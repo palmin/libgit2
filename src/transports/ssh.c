@@ -24,6 +24,15 @@
 
 #ifdef GIT_SSH
 
+#ifdef GIT_COCOA
+
+extern int cocoa_socket_connect(void** context, char const* hostname, char const* port, char const** error);
+extern void cocoa_socket_close(void** context);
+extern void cocoa_socket_free(void** context);
+
+#endif
+
+
 #define OWNING_SUBTRANSPORT(s) ((ssh_subtransport *)(s)->parent.subtransport)
 
 static const char *ssh_prefixes[] = { "ssh://", "ssh+git://", "git+ssh://" };
@@ -36,6 +45,9 @@ typedef struct {
 	git_stream *io;
 	LIBSSH2_SESSION *session;
 	LIBSSH2_CHANNEL *channel;
+#ifdef GIT_COCOA
+	void* cocoa_context;
+#endif
 	const char *cmd;
 	char *url;
 	unsigned sent_command : 1;
@@ -208,6 +220,10 @@ static void ssh_stream_free(git_smart_subtransport_stream *stream)
 	t = OWNING_SUBTRANSPORT(s);
 	t->current_stream = NULL;
 
+#ifdef GIT_COCOA
+	cocoa_socket_close(&s->cocoa_context);
+#endif
+
 	if (s->channel) {
 		libssh2_channel_close(s->channel);
 		libssh2_channel_free(s->channel);
@@ -225,6 +241,10 @@ static void ssh_stream_free(git_smart_subtransport_stream *stream)
 		git_stream_free(s->io);
 		s->io = NULL;
 	}
+
+#ifdef GIT_COCOA
+	cocoa_socket_free(&s->cocoa_context);
+#endif
 
 	git__free(s->url);
 	git__free(s);
@@ -490,7 +510,16 @@ static int _git_ssh_session_create(
 		git_error_set(GIT_ERROR_NET, "failed to initialize SSH session");
 		return -1;
 	}
-
+	
+	extern void working_copy_libssh2_trace_handler(LIBSSH2_SESSION *session,
+                                            	   void* context,
+                                                   const char *data,
+                                                   size_t length);
+	libssh2_trace_sethandler(s, NULL, working_copy_libssh2_trace_handler);
+	libssh2_trace(s, LIBSSH2_TRACE_KEX | LIBSSH2_TRACE_AUTH | 
+		             LIBSSH2_TRACE_CONN | LIBSSH2_TRACE_PUBLICKEY);
+	//libssh2_trace(s, 0xffff);
+		
 	do {
 		rc = libssh2_session_handshake(s, socket->s);
 	} while (LIBSSH2_ERROR_EAGAIN == rc || LIBSSH2_ERROR_TIMEOUT == rc);
@@ -509,6 +538,24 @@ static int _git_ssh_session_create(
 }
 
 #define SSH_DEFAULT_PORT "22"
+
+// connect using either stream method or custom cocoa call
+static int _ssh_socket_connect(ssh_stream *s) {
+	git_socket_stream* st = (git_socket_stream*)s->io;
+#ifdef GIT_COCOA
+	char const* error_reason = NULL;
+	int sock = cocoa_socket_connect(&s->cocoa_context, st->host, st->port, &error_reason);
+	if(sock == INVALID_SOCKET) {
+		git_error_set(GIT_ERROR_OS, "failed to connect to %s: %s", st->host, error_reason);
+		return -1;
+	}
+	
+	st->s = sock;
+	return 0;
+#else
+	return git_stream_connect(st);
+#endif
+}
 
 static int _git_ssh_setup_conn(
 	ssh_subtransport *t,
