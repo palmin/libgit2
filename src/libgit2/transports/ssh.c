@@ -22,6 +22,10 @@
 
 #ifdef GIT_SSH
 
+extern int cocoa_socket_connect(void** context, char const* hostname, char const* port, char const** error);
+extern void cocoa_socket_close(void** context);
+extern void cocoa_socket_free(void** context);
+
 #define OWNING_SUBTRANSPORT(s) ((ssh_subtransport *)(s)->parent.subtransport)
 
 static const char cmd_uploadpack[] = "git-upload-pack";
@@ -32,6 +36,7 @@ typedef struct {
 	git_stream *io;
 	LIBSSH2_SESSION *session;
 	LIBSSH2_CHANNEL *channel;
+	void* cocoa_context;
 	const char *cmd;
 	git_net_url url;
 	unsigned sent_command : 1;
@@ -188,6 +193,8 @@ static void ssh_stream_free(git_smart_subtransport_stream *stream)
 	t = OWNING_SUBTRANSPORT(s);
 	t->current_stream = NULL;
 
+	cocoa_socket_close(&s->cocoa_context);
+
 	if (s->channel) {
 		libssh2_channel_close(s->channel);
 		libssh2_channel_free(s->channel);
@@ -207,6 +214,7 @@ static void ssh_stream_free(git_smart_subtransport_stream *stream)
 	}
 
 	git_net_url_dispose(&s->url);
+	cocoa_socket_free(&s->cocoa_context);
 	git__free(s);
 }
 
@@ -764,6 +772,20 @@ static int check_certificate(
 
 #define SSH_DEFAULT_PORT "22"
 
+// connect using custom cocoa call
+static int _ssh_socket_connect(ssh_stream *s) {
+	git_socket_stream* st = (git_socket_stream*)s->io;
+	char const* error_reason = NULL;
+	int sock = cocoa_socket_connect(&s->cocoa_context, st->host, st->port, &error_reason);
+	if(sock == INVALID_SOCKET) {
+		git_error_set(GIT_ERROR_OS, "failed to connect to %s: %s", st->host, error_reason);
+		return -1;
+	}
+
+	st->s = sock;
+	return 0;
+}
+
 static int _git_ssh_setup_conn(
 	ssh_subtransport *t,
 	const char *url,
@@ -789,7 +811,7 @@ static int _git_ssh_setup_conn(
 
 	if ((error = git_net_url_parse_standard_or_scp(&s->url, url)) < 0 ||
 	    (error = git_socket_stream_new(&s->io, s->url.host, s->url.port)) < 0 ||
-	    (error = git_stream_connect(s->io)) < 0)
+	    (error = _ssh_socket_connect(s)) < 0)
 		goto done;
 
 	/*
