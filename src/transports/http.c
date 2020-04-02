@@ -550,7 +550,7 @@ static int on_headers_complete(http_parser *parser)
 	if (git_buf_oom(&buf))
 		return t->parse_error = PARSE_ERROR_GENERIC;
 
-	if (strcmp(t->content_type, git_buf_cstr(&buf))) {
+	if (0 && strcmp(t->content_type, git_buf_cstr(&buf))) {
 		git_buf_dispose(&buf);
 		git_error_set(GIT_ERROR_NET,
 			"invalid Content-Type: %s",
