@@ -601,7 +601,7 @@ static int _git_ssh_setup_conn(
 
 post_extract:
 	if ((error = git_socket_stream_new(&s->io, urldata.host, urldata.port)) < 0 ||
-	    (error = git_stream_connect(s->io)) < 0)
+	    (error = _ssh_socket_connect(s)) < 0)
 		goto done;
 
 	if ((error = _git_ssh_session_create(&session, s->io)) < 0)
