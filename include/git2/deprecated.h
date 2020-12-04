@@ -102,7 +102,11 @@ GIT_EXTERN(int) git_blob_create_fromstream_commit(
 GIT_EXTERN(int) git_blob_create_frombuffer(
 	git_oid *id, git_repository *repo, const void *buffer, size_t len);
 
-/** Deprecated in favor of @see git_blob_filter */
+/** Deprecated in favor of `git_blob_filter`.
+ *
+ * @deprecated Use git_blob_filter
+ * @see git_blob_filter
+ */
 GIT_EXTERN(int) git_blob_filtered_content(
 	git_buf *out,
 	git_blob *blob,
@@ -233,7 +237,7 @@ GIT_EXTERN(void) giterr_clear(void);
 GIT_EXTERN(void) giterr_set_str(int error_class, const char *string);
 
 /**
- * Indicates that an out-of-memory situation occured.  This is an alias
+ * Indicates that an out-of-memory situation occurred.  This is an alias
  * of `git_error_set_oom` and is preserved for backward compatibility.
  *
  * This function is deprecated, but there is no plan to remove this
@@ -521,6 +525,42 @@ typedef git_push_transfer_progress_cb git_push_transfer_progress;
  * Callback for listing the remote heads
  */
 typedef int GIT_CALLBACK(git_headlist_cb)(git_remote_head *rhead, void *payload);
+
+/**@}*/
+
+/** @name Deprecated String Array Functions
+ *
+ * These types are retained for backward compatibility.  The newer
+ * versions of these values should be preferred in all new code.
+ *
+ * There is no plan to remove these backward compatibility values at
+ * this time.
+ */
+/**@{*/
+
+/**
+ * Copy a string array object from source to target.
+ *
+ * This function is deprecated, but there is no plan to remove this
+ * function at this time.
+ *
+ * @param tgt target
+ * @param src source
+ * @return 0 on success, < 0 on allocation failure
+ */
+GIT_EXTERN(int) git_strarray_copy(git_strarray *tgt, const git_strarray *src);
+
+/**
+ * Free the memory referred to by the git_strarray.  This is an alias of
+ * `git_strarray_dispose` and is preserved for backward compatibility.
+ *
+ * This function is deprecated, but there is no plan to remove this
+ * function at this time.
+ *
+ * @deprecated Use git_strarray_dispose
+ * @see git_strarray_dispose
+ */
+GIT_EXTERN(void) git_strarray_free(git_strarray *array);
 
 /**@}*/
 

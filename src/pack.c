@@ -488,8 +488,12 @@ int git_packfile_resolve_header(
 		size_t base_size;
 		git_packfile_stream stream;
 
-		base_offset = get_delta_base(p, &w_curs, &curpos, type, offset);
+		error = get_delta_base(&base_offset, p, &w_curs, &curpos, type, offset);
 		git_mwindow_close(&w_curs);
+
+		if (error < 0)
+			return error;
+
 		if ((error = git_packfile_stream_open(&stream, p, curpos)) < 0)
 			return error;
 		error = git_delta_read_header_fromstream(&base_size, size_p, &stream);
@@ -508,8 +512,12 @@ int git_packfile_resolve_header(
 			return error;
 		if (type != GIT_OBJECT_OFS_DELTA && type != GIT_OBJECT_REF_DELTA)
 			break;
-		base_offset = get_delta_base(p, &w_curs, &curpos, type, base_offset);
+
+		error = get_delta_base(&base_offset, p, &w_curs, &curpos, type, base_offset);
 		git_mwindow_close(&w_curs);
+
+		if (error < 0)
+			return error;
 	}
 	*type_p = type;
 
@@ -583,17 +591,11 @@ static int pack_dependency_chain(git_dependency_chain *chain_out,
 		if (type != GIT_OBJECT_OFS_DELTA && type != GIT_OBJECT_REF_DELTA)
 			break;
 
-		base_offset = get_delta_base(p, &w_curs, &curpos, type, obj_offset);
+		error = get_delta_base(&base_offset, p, &w_curs, &curpos, type, obj_offset);
 		git_mwindow_close(&w_curs);
 
-		if (base_offset == 0) {
-			error = packfile_error("delta offset is zero");
+		if (error < 0)
 			goto on_error;
-		}
-		if (base_offset < 0) { /* must actually be an error code */
-			error = (int)base_offset;
-			goto on_error;
-		}
 
 		/* we need to pass the pos *after* the delta-base bit */
 		elem->offset = curpos;
@@ -842,7 +844,10 @@ static int packfile_unpack_compressed(
 		unsigned int window_len;
 		unsigned char *in;
 
-		in = pack_window_open(p, mwindow, *position, &window_len);
+		if ((in = pack_window_open(p, mwindow, *position, &window_len)) == NULL) {
+			error = -1;
+			goto out;
+		}
 
 		if ((error = git_zstream_set_input(&zstream, in, window_len)) < 0 ||
 		    (error = git_zstream_get_output_chunk(data + total, &bytes, &zstream)) < 0) {
@@ -852,9 +857,12 @@ static int packfile_unpack_compressed(
 
 		git_mwindow_close(mwindow);
 
+		if (!bytes)
+			break;
+
 		*position += window_len - zstream.in_len;
 		total += bytes;
-	} while (total < size);
+	} while (!git_zstream_eos(&zstream));
 
 	if (total != size || !git_zstream_eos(&zstream)) {
 		git_error_set(GIT_ERROR_ZLIB, "error inflating zlib stream");
@@ -878,17 +886,20 @@ out:
  * curpos is where the data starts, delta_obj_offset is the where the
  * header starts
  */
-off64_t get_delta_base(
-	struct git_pack_file *p,
-	git_mwindow **w_curs,
-	off64_t *curpos,
-	git_object_t type,
-	off64_t delta_obj_offset)
+int get_delta_base(
+		off64_t *delta_base_out,
+		struct git_pack_file *p,
+		git_mwindow **w_curs,
+		off64_t *curpos,
+		git_object_t type,
+		off64_t delta_obj_offset)
 {
 	unsigned int left = 0;
 	unsigned char *base_info;
 	off64_t base_offset;
 	git_oid unused;
+
+	assert(delta_base_out);
 
 	base_info = pack_window_open(p, w_curs, *curpos, &left);
 	/* Assumption: the only reason this would fail is because the file is too small */
@@ -909,12 +920,12 @@ off64_t get_delta_base(
 				return GIT_EBUFS;
 			unsigned_base_offset += 1;
 			if (!unsigned_base_offset || MSB(unsigned_base_offset, 7))
-				return 0; /* overflow */
+				return packfile_error("overflow");
 			c = base_info[used++];
 			unsigned_base_offset = (unsigned_base_offset << 7) + (c & 127);
 		}
 		if (unsigned_base_offset == 0 || (size_t)delta_obj_offset <= unsigned_base_offset)
-			return 0; /* out of bound */
+			return packfile_error("out of bounds");
 		base_offset = delta_obj_offset - unsigned_base_offset;
 		*curpos += used;
 	} else if (type == GIT_OBJECT_REF_DELTA) {
@@ -925,8 +936,12 @@ off64_t get_delta_base(
 
 			git_oid_fromraw(&oid, base_info);
 			if ((entry = git_oidmap_get(p->idx_cache, &oid)) != NULL) {
+				if (entry->offset == 0)
+					return packfile_error("delta offset is zero");
+
 				*curpos += 20;
-				return entry->offset;
+				*delta_base_out = entry->offset;
+				return 0;
 			} else {
 				/* If we're building an index, don't try to find the pack
 				 * entry; we just haven't seen it yet.  We'll make
@@ -941,9 +956,13 @@ off64_t get_delta_base(
 			return packfile_error("base entry delta is not in the same pack");
 		*curpos += 20;
 	} else
-		return 0;
+		return packfile_error("unknown object type");
 
-	return base_offset;
+	if (base_offset == 0)
+		return packfile_error("delta offset is zero");
+
+	*delta_base_out = base_offset;
+	return 0;
 }
 
 /***********************************************************
@@ -1238,14 +1257,14 @@ int git_pack_foreach_entry(
 	return error;
 }
 
-static int sha1_position(const void *table, size_t stride, unsigned lo,
-			 unsigned hi, const unsigned char *key)
+int git_pack__lookup_sha1(const void *oid_lookup_table, size_t stride, unsigned lo,
+		unsigned hi, const unsigned char *oid_prefix)
 {
-	const unsigned char *base = table;
+	const unsigned char *base = oid_lookup_table;
 
 	while (lo < hi) {
 		unsigned mi = (lo + hi) / 2;
-		int cmp = git_oid__hashcmp(base + mi * stride, key);
+		int cmp = git_oid__hashcmp(base + mi * stride, oid_prefix);
 
 		if (!cmp)
 			return mi;
@@ -1307,7 +1326,7 @@ static int pack_entry_find_offset(
 		short_oid->id[0], short_oid->id[1], short_oid->id[2], lo, hi, p->num_objects);
 #endif
 
-	pos = sha1_position(index, stride, lo, hi, short_oid->id);
+	pos = git_pack__lookup_sha1(index, stride, lo, hi, short_oid->id);
 
 	if (pos >= 0) {
 		/* An object matching exactly the oid was found */

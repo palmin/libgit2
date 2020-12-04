@@ -4,7 +4,7 @@ libgit2 - the Git linkable library
 | Build Status | |
 | ------------ | - |
 | **master** branch CI builds | [![Azure Pipelines Build Status](https://dev.azure.com/libgit2/libgit2/_apis/build/status/libgit2?branchName=master)](https://dev.azure.com/libgit2/libgit2/_build/latest?definitionId=7&branchName=master)   |
-| **v0.99 branch** CI builds | [![Azure Pipelines Build Status](https://dev.azure.com/libgit2/libgit2/_apis/build/status/libgit2?branchName=maint/v0.99)](https://dev.azure.com/libgit2/libgit2/_build/latest?definitionId=7&branchName=maint/v0.99) |
+| **v1.0 branch** CI builds | [![Azure Pipelines Build Status](https://dev.azure.com/libgit2/libgit2/_apis/build/status/libgit2?branchName=maint/v1.0)](https://dev.azure.com/libgit2/libgit2/_build/latest?definitionId=7&branchName=maint/v1.0) |
 | **v0.28 branch** CI builds | [![Azure Pipelines Build Status](https://dev.azure.com/libgit2/libgit2/_apis/build/status/libgit2?branchName=maint/v0.28)](https://dev.azure.com/libgit2/libgit2/_build/latest?definitionId=7&branchName=maint/v0.28) |
 | **Nightly** builds | [![Azure Pipelines Build Status](https://libgit2.visualstudio.com/libgit2/_apis/build/status/nightly?branchName=master&label=Full+Build)](https://libgit2.visualstudio.com/libgit2/_build/latest?definitionId=9&branchName=master) [![Coverity Build Status](https://dev.azure.com/libgit2/libgit2/_apis/build/status/coverity?branchName=master&label=Coverity+Build)](https://dev.azure.com/libgit2/libgit2/_build/latest?definitionId=21?branchName=master) [![Coverity Scan Build Status](https://scan.coverity.com/projects/639/badge.svg)](https://scan.coverity.com/projects/639) |
 
@@ -47,6 +47,7 @@ Table of Contents
     * [Compiler and linker options](#compiler-and-linker-options)
     * [MacOS X](#macos-x)
     * [Android](#android)
+    * [MinGW](#mingw)
 * [Language Bindings](#language-bindings)
 * [How Can I Contribute?](#how-can-i-contribute)
 * [License](#license)
@@ -303,6 +304,20 @@ with full path to the toolchain):
 
 Add `-DCMAKE_TOOLCHAIN_FILE={pathToToolchainFile}` to cmake command
 when configuring.
+
+MinGW
+-----
+
+If you want to build the library in MinGW environment with SSH support enabled,
+you may need to pass `-DCMAKE_LIBRARY_PATH="${MINGW_PREFIX}/${MINGW_CHOST}/lib/"` flag
+to CMake when configuring. This is because CMake cannot find the Win32 libraries in
+MinGW folders by default and you might see an error message stating that CMake
+could not resolve `ws2_32` library during configuration.
+
+Another option would be to install `msys2-w32api-runtime` package before configuring.
+This package installs the Win32 libraries into `/usr/lib` folder which is by default
+recognized as the library path by CMake. Please note though that this package is meant
+for MSYS subsystem which is different from MinGW.
 
 Language Bindings
 ==================================

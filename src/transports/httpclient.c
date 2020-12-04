@@ -445,7 +445,7 @@ GIT_INLINE(int) client_write_request(git_http_client *client)
 				      0);
 }
 
-const char *name_for_method(git_http_method method)
+static const char *name_for_method(git_http_method method)
 {
 	switch (method) {
 	case GIT_HTTP_METHOD_GET:
@@ -1120,11 +1120,6 @@ GIT_INLINE(int) client_read_and_parse(git_http_client *client)
 		return -1;
 	}
 
-	if (parser->upgrade) {
-		git_error_set(GIT_ERROR_HTTP, "server requested upgrade");
-		return -1;
-	}
-
 	if (ctx->parse_status == PARSE_STATUS_ERROR) {
 		client->connected = 0;
 		return ctx->error ? ctx->error : -1;
@@ -1374,8 +1369,11 @@ int git_http_client_read_response(
 
 	git_http_response_dispose(response);
 
-	git_vector_free_deep(&client->server.auth_challenges);
-	git_vector_free_deep(&client->proxy.auth_challenges);
+	if (client->current_server == PROXY) {
+		git_vector_free_deep(&client->proxy.auth_challenges);
+	} else if(client->current_server == SERVER) {
+		git_vector_free_deep(&client->server.auth_challenges);
+	}
 
 	client->state = READING_RESPONSE;
 	client->keepalive = 0;

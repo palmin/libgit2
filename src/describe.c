@@ -685,7 +685,7 @@ int git_describe_commit(
 			get_name, &data)) < 0)
 				goto cleanup;
 
-	if (git_oidmap_size(data.names) == 0 && !opts->show_commit_oid_as_fallback) {
+	if (git_oidmap_size(data.names) == 0 && !normalized.show_commit_oid_as_fallback) {
 		git_error_set(GIT_ERROR_DESCRIBE, "cannot describe - "
 			"no reference found, cannot describe anything.");
 		error = -1;
@@ -876,10 +876,12 @@ int git_describe_options_init(git_describe_options *opts, unsigned int version)
 	return 0;
 }
 
+#ifndef GIT_DEPRECATE_HARD
 int git_describe_init_options(git_describe_options *opts, unsigned int version)
 {
 	return git_describe_options_init(opts, version);
 }
+#endif
 
 int git_describe_format_options_init(git_describe_format_options *opts, unsigned int version)
 {
@@ -888,7 +890,9 @@ int git_describe_format_options_init(git_describe_format_options *opts, unsigned
 	return 0;
 }
 
+#ifndef GIT_DEPRECATE_HARD
 int git_describe_init_format_options(git_describe_format_options *opts, unsigned int version)
 {
 	return git_describe_format_options_init(opts, version);
 }
+#endif

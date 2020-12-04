@@ -44,8 +44,8 @@ typedef struct
 
 static git_cache *odb_cache(git_odb *odb)
 {
-	if (odb->rc.owner != NULL) {
-		git_repository *owner = odb->rc.owner;
+	git_repository *owner = GIT_REFCOUNT_OWNER(odb);
+	if (owner != NULL) {
 		return &owner->objects;
 	}
 
@@ -664,7 +664,7 @@ int git_odb_open(git_odb **out, const char *objects_dir)
 int git_odb__set_caps(git_odb *odb, int caps)
 {
 	if (caps == GIT_ODB_CAP_FROM_OWNER) {
-		git_repository *repo = odb->rc.owner;
+		git_repository *repo = GIT_REFCOUNT_OWNER(odb);
 		int val;
 
 		if (!repo) {
@@ -1283,12 +1283,13 @@ int git_odb_write(
 	git_oid *oid, git_odb *db, const void *data, size_t len, git_object_t type)
 {
 	size_t i;
-	int error = GIT_ERROR;
+	int error;
 	git_odb_stream *stream;
 
 	assert(oid && db);
 
-	git_odb_hash(oid, data, len, type);
+	if ((error = git_odb_hash(oid, data, len, type)) < 0)
+		return error;
 
 	if (git_oid_is_zero(oid))
 		return error_null_oid(GIT_EINVALID, "cannot write object");
@@ -1296,7 +1297,7 @@ int git_odb_write(
 	if (git_odb__freshen(db, oid))
 		return 0;
 
-	for (i = 0; i < db->backends.length && error < 0; ++i) {
+	for (i = 0, error = GIT_ERROR; i < db->backends.length && error < 0; ++i) {
 		backend_internal *internal = git_vector_get(&db->backends, i);
 		git_odb_backend *b = internal->backend;
 
@@ -1510,10 +1511,12 @@ void *git_odb_backend_data_alloc(git_odb_backend *backend, size_t len)
 	return git__malloc(len);
 }
 
+#ifndef GIT_DEPRECATE_HARD
 void *git_odb_backend_malloc(git_odb_backend *backend, size_t len)
 {
 	return git_odb_backend_data_alloc(backend, len);
 }
+#endif
 
 void git_odb_backend_data_free(git_odb_backend *backend, void *data)
 {

@@ -195,10 +195,12 @@ int git_remote_create_options_init(git_remote_create_options *opts, unsigned int
 	return 0;
 }
 
+#ifndef GIT_DEPRECATE_HARD
 int git_remote_create_init_options(git_remote_create_options *opts, unsigned int version)
 {
 	return git_remote_create_options_init(opts, version);
 }
+#endif
 
 int git_remote_create_with_opts(git_remote **out, const char *url, const git_remote_create_options *opts)
 {
@@ -686,7 +688,7 @@ int git_remote__urlfordirection(git_buf *url_out, struct git_remote *remote, int
 	return resolve_url(url_out, url, direction, callbacks);
 }
 
-int set_transport_callbacks(git_transport *t, const git_remote_callbacks *cbs)
+static int remote_transport_set_callbacks(git_transport *t, const git_remote_callbacks *cbs)
 {
 	if (!t->set_callbacks || !cbs)
 		return 0;
@@ -744,7 +746,7 @@ int git_remote__connect(git_remote *remote, git_direction direction, const git_r
 	if ((error = set_transport_custom_headers(t, conn->custom_headers)) != 0)
 		goto on_error;
 
-	if ((error = set_transport_callbacks(t, callbacks)) < 0 ||
+	if ((error = remote_transport_set_callbacks(t, callbacks)) < 0 ||
 	    (error = t->connect(t, url.ptr, credentials, payload, conn->proxy, direction, flags)) != 0)
 		goto on_error;
 
@@ -1237,7 +1239,7 @@ static int prune_candidates(git_vector *candidates, git_remote *remote)
 	}
 
 out:
-	git_strarray_free(&arr);
+	git_strarray_dispose(&arr);
 	return error;
 }
 
@@ -2373,29 +2375,36 @@ int git_remote_default_branch(git_buf *out, git_remote *remote)
 	const git_remote_head *guess = NULL;
 	const git_oid *head_id;
 	size_t heads_len, i;
+	git_buf local_default = GIT_BUF_INIT;
 	int error;
 
 	assert(out);
 
 	if ((error = git_remote_ls(&heads, &heads_len, remote)) < 0)
-		return error;
+		goto done;
 
-	if (heads_len == 0)
-		return GIT_ENOTFOUND;
-
-	if (strcmp(heads[0]->name, GIT_HEAD_FILE))
-		return GIT_ENOTFOUND;
+	if (heads_len == 0 || strcmp(heads[0]->name, GIT_HEAD_FILE)) {
+		error = GIT_ENOTFOUND;
+		goto done;
+	}
 
 	git_buf_sanitize(out);
+
 	/* the first one must be HEAD so if that has the symref info, we're done */
-	if (heads[0]->symref_target)
-		return git_buf_puts(out, heads[0]->symref_target);
+	if (heads[0]->symref_target) {
+		error = git_buf_puts(out, heads[0]->symref_target);
+		goto done;
+	}
 
 	/*
 	 * If there's no symref information, we have to look over them
-	 * and guess. We return the first match unless the master
-	 * branch is a candidate. Then we return the master branch.
+	 * and guess. We return the first match unless the default
+	 * branch is a candidate. Then we return the default branch.
 	 */
+
+	if ((error = git_repository_initialbranch(&local_default, remote->repo)) < 0)
+		goto done;
+
 	head_id = &heads[0]->oid;
 
 	for (i = 1; i < heads_len; i++) {
@@ -2410,16 +2419,22 @@ int git_remote_default_branch(git_buf *out, git_remote *remote)
 			continue;
 		}
 
-		if (!git__strcmp(GIT_REFS_HEADS_MASTER_FILE, heads[i]->name)) {
+		if (!git__strcmp(local_default.ptr, heads[i]->name)) {
 			guess = heads[i];
 			break;
 		}
 	}
 
-	if (!guess)
-		return GIT_ENOTFOUND;
+	if (!guess) {
+		error = GIT_ENOTFOUND;
+		goto done;
+	}
 
-	return git_buf_puts(out, guess->name);
+	error = git_buf_puts(out, guess->name);
+
+done:
+	git_buf_dispose(&local_default);
+	return error;
 }
 
 int git_remote_upload(git_remote *remote, const git_strarray *refspecs, const git_push_options *opts)
