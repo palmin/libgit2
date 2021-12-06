@@ -1,4 +1,5 @@
 #include "clar_libgit2.h"
+#include <git2/sys/commit_graph.h>
 #include <git2/sys/config.h>
 #include <git2/sys/filter.h>
 #include <git2/sys/odb_backend.h>
@@ -48,7 +49,7 @@ static void options_cmp(void *one, void *two, size_t size, const char *name)
 
 			p_snprintf(desc, 1024, "Difference in %s at byte %" PRIuZ ": macro=%u / func=%u",
 				name, i, ((char *)one)[i], ((char *)two)[i]);
-			clar__fail(__FILE__, __LINE__,
+			clar__fail(__FILE__, __func__, __LINE__,
 				"Difference between macro and function options initializer",
 				desc, 0);
 			return;
@@ -82,6 +83,11 @@ void test_core_structinit__compare(void)
 		git_blame_options, GIT_BLAME_OPTIONS_VERSION, \
 		GIT_BLAME_OPTIONS_INIT, git_blame_options_init);
 
+	/* blob_filter_options */
+	CHECK_MACRO_FUNC_INIT_EQUAL( \
+		git_blob_filter_options, GIT_BLOB_FILTER_OPTIONS_VERSION, \
+		GIT_BLOB_FILTER_OPTIONS_INIT, git_blob_filter_options_init);
+
 	/* checkout */
 	CHECK_MACRO_FUNC_INIT_EQUAL( \
 		git_checkout_options, GIT_CHECKOUT_OPTIONS_VERSION, \
@@ -91,6 +97,13 @@ void test_core_structinit__compare(void)
 	CHECK_MACRO_FUNC_INIT_EQUAL( \
 		git_clone_options, GIT_CLONE_OPTIONS_VERSION, \
 		GIT_CLONE_OPTIONS_INIT, git_clone_options_init);
+
+	/* commit_graph_writer */
+	CHECK_MACRO_FUNC_INIT_EQUAL( \
+		git_commit_graph_writer_options, \
+		GIT_COMMIT_GRAPH_WRITER_OPTIONS_VERSION, \
+		GIT_COMMIT_GRAPH_WRITER_OPTIONS_INIT, \
+		git_commit_graph_writer_options_init);
 
 	/* diff */
 	CHECK_MACRO_FUNC_INIT_EQUAL( \
