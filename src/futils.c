@@ -681,7 +681,7 @@ typedef struct {
 	int depth;
 } futils__rmdir_data;
 
-#define FUTILS_MAX_DEPTH 100
+#define FUTILS_MAX_DEPTH 150
 
 static int futils__error_cannot_rmdir(const char *path, const char *filemsg)
 {
