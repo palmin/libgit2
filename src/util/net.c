@@ -22,7 +22,7 @@
 #define GIT_NET_URL_PARSER_INIT { 0 }
 
 typedef struct {
-	int hierarchical : 1;
+	unsigned int hierarchical : 1;
 
 	const char *scheme;
 	const char *user;
@@ -657,7 +657,7 @@ static bool has_at(const char *str)
 int git_net_url_parse_scp(git_net_url *url, const char *given)
 {
 	const char *default_port = default_port_for_scheme("ssh");
-	const char *c, *user, *host, *port, *path = NULL;
+	const char *c, *user, *host, *port = NULL, *path = NULL;
 	size_t user_len = 0, host_len = 0, port_len = 0;
 	unsigned short bracket = 0;
 

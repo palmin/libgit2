@@ -6,7 +6,7 @@
 
 cmake_minimum_required(VERSION 3.5.1)
 
-project(libgit2 VERSION "1.7.2" LANGUAGES C)
+project(libgit2 VERSION "1.8.0" LANGUAGES C)
 
 # Add find modules to the path
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${PROJECT_SOURCE_DIR}/cmake")
@@ -30,7 +30,7 @@ option(USE_THREADS             "Use threads for parallel processing when possibl
 option(USE_NSEC                "Support nanosecond precision file mtimes and ctimes"    ON)
 
 # Backend selection
-option(USE_SSH                 "Link with libssh2 to enable SSH support"               OFF)
+option(USE_SSH                 "Enable SSH support. Can be set to a specific backend" OFF)
 option(USE_HTTPS               "Enable HTTPS support. Can be set to a specific backend" ON)
 option(USE_SHA1                "Enable SHA1. Can be set to CollisionDetection(ON)/HTTPS" ON)
 option(USE_SHA256              "Enable SHA256. Can be set to HTTPS/Builtin" ON)

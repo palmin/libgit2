@@ -135,7 +135,8 @@ endif()
 # platform libraries
 
 if(WIN32)
-	list(APPEND LIBGIT2_SYSTEM_LIBS ws2_32)
+	list(APPEND LIBGIT2_SYSTEM_LIBS "ws2_32" "secur32")
+	list(APPEND LIBGIT2_PC_LIBS "-lws2_32" "-lsecur32")
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "(Solaris|SunOS)")
@@ -183,7 +184,7 @@ add_feature_info(ntlmclient GIT_NTLM "NTLM authentication support for Unix")
 
 # iconv
 if(USE_ICONV)
-	find_package(Iconv)
+	find_package(IntlIconv)
 endif()
 if(ICONV_FOUND)
 	set(GIT_USE_ICONV 1)

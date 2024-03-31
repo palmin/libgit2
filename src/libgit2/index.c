@@ -1612,15 +1612,17 @@ int git_index_add_bypath(git_index *index, const char *path)
 
 	if (ret == GIT_EDIRECTORY) {
 		git_submodule *sm;
-		git_error_state err;
+		git_error *last_error;
 
-		git_error_state_capture(&err, ret);
+		git_error_save(&last_error);
 
 		ret = git_submodule_lookup(&sm, INDEX_OWNER(index), path);
-		if (ret == GIT_ENOTFOUND)
-			return git_error_state_restore(&err);
+		if (ret == GIT_ENOTFOUND) {
+			git_error_restore(last_error);
+			return GIT_EDIRECTORY;
+		}
 
-		git_error_state_free(&err);
+		git_error_free(last_error);
 
 		/*
 		 * EEXISTS means that there is a repository at that path, but it's not known
@@ -2758,6 +2760,7 @@ static int parse_index(git_index *index, const char *buffer, size_t buffer_size)
 	unsigned int i;
 	struct index_header header = { 0 };
 	unsigned char checksum[GIT_HASH_MAX_SIZE];
+	unsigned char zero_checksum[GIT_HASH_MAX_SIZE] = { 0 };
 	size_t checksum_size = git_hash_size(git_oid_algorithm(index->oid_type));
 	const char *last = NULL;
 	const char *empty = "";
@@ -2847,8 +2850,11 @@ static int parse_index(git_index *index, const char *buffer, size_t buffer_size)
 	/*
 	 * SHA-1 or SHA-256 (depending on the repository's object format)
 	 * over the content of the index file before this checksum.
+	 * Note: checksum may be 0 if the index was written by a client
+	 * where index.skipHash was set to true.
 	 */
-	if (memcmp(checksum, buffer, checksum_size) != 0) {
+	if (memcmp(zero_checksum, buffer, checksum_size) != 0 &&
+	    memcmp(checksum, buffer, checksum_size) != 0) {
 		error = index_error_invalid(
 			"calculated checksum does not match expected");
 		goto done;

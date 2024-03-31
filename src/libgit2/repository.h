@@ -173,6 +173,7 @@ GIT_INLINE(git_attr_cache *) git_repository_attr_cache(git_repository *repo)
 	return repo->attrcache;
 }
 
+int git_repository_head_commit(git_commit **commit, git_repository *repo);
 int git_repository_head_tree(git_tree **tree, git_repository *repo);
 int git_repository_create_head(const char *git_dir, const char *ref_name);
 
@@ -279,5 +280,8 @@ void git_repository__free_extensions(void);
 int git_repository__set_objectformat(
 	git_repository *repo,
 	git_oid_t oid_type);
+
+/* SHA256-aware internal functions */
+int git_repository__new(git_repository **out, git_oid_t oid_type);
 
 #endif
