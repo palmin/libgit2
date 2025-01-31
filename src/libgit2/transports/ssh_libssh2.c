@@ -865,10 +865,15 @@ static int _git_ssh_setup_conn(
 	if ((error = list_auth_methods(&auth_methods, session, s->url.username)) < 0)
 		goto done;
 
-	error = GIT_EAUTH;
-	/* if we already have something to try */
-	if (cred && auth_methods & cred->credtype)
-		error = _git_ssh_authenticate_session(session, cred);
+	/* after reading methods, authentication might already have completed */
+	if(libssh2_userauth_authenticated(session) == 1) {
+		error = GIT_OK;
+	} else {
+		error = GIT_EAUTH;
+		/* if we already have something to try */
+		if (cred && auth_methods & cred->credtype)
+			error = _git_ssh_authenticate_session(session, cred);
+	}
 
 	while (error == GIT_EAUTH) {
 		if (cred) {
