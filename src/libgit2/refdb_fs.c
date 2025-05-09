@@ -26,7 +26,6 @@
 #include <git2/branch.h>
 #include <git2/sys/refdb_backend.h>
 #include <git2/sys/refs.h>
-#include <git2/sys/reflog.h>
 
 #define DEFAULT_NESTING_LEVEL	5
 #define MAX_NESTING_LEVEL		10
@@ -801,7 +800,7 @@ static void refdb_fs_backend__iterator_free(git_reference_iterator *_iter)
 {
 	refdb_fs_iter *iter = GIT_CONTAINER_OF(_iter, refdb_fs_iter, parent);
 
-	git_vector_free(&iter->loose);
+	git_vector_dispose(&iter->loose);
 	git_pool_clear(&iter->pool);
 	git_sortedcache_free(iter->cache);
 	git__free(iter);

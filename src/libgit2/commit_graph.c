@@ -13,7 +13,6 @@
 #include "futils.h"
 #include "hash.h"
 #include "oidarray.h"
-#include "oidmap.h"
 #include "pack.h"
 #include "repository.h"
 #include "revwalk.h"
@@ -25,6 +24,7 @@
 #define COMMIT_GRAPH_SIGNATURE 0x43475048 /* "CGPH" */
 #define COMMIT_GRAPH_VERSION 1
 #define COMMIT_GRAPH_OBJECT_ID_VERSION 1
+
 struct git_commit_graph_header {
 	uint32_t signature;
 	uint8_t version;
@@ -365,14 +365,23 @@ int git_commit_graph_open(
 	git_commit_graph **cgraph_out,
 	const char *objects_dir
 #ifdef GIT_EXPERIMENTAL_SHA256
-	, git_oid_t oid_type
+	, const git_commit_graph_open_options *opts
 #endif
 	)
 {
-#ifndef GIT_EXPERIMENTAL_SHA256
-	git_oid_t oid_type = GIT_OID_SHA1;
-#endif
+	git_oid_t oid_type;
 	int error;
+
+#ifdef GIT_EXPERIMENTAL_SHA256
+	GIT_ERROR_CHECK_VERSION(opts,
+		GIT_COMMIT_GRAPH_OPEN_OPTIONS_VERSION,
+		"git_commit_graph_open_options");
+
+	oid_type = opts && opts->oid_type ? opts->oid_type : GIT_OID_DEFAULT;
+	GIT_ASSERT_ARG(git_oid_type_is_valid(oid_type));
+#else
+	oid_type = GIT_OID_SHA1;
+#endif
 
 	error = git_commit_graph_new(cgraph_out, objects_dir, true,
 			oid_type);
@@ -684,21 +693,40 @@ static int packed_commit__cmp(const void *a_, const void *b_)
 	return git_oid_cmp(&a->sha1, &b->sha1);
 }
 
+int git_commit_graph_writer_options_init(
+	git_commit_graph_writer_options *opts,
+	unsigned int version)
+{
+	GIT_INIT_STRUCTURE_FROM_TEMPLATE(
+		opts,
+		version,
+		git_commit_graph_writer_options,
+		GIT_COMMIT_GRAPH_WRITER_OPTIONS_INIT);
+	return 0;
+}
+
 int git_commit_graph_writer_new(
 	git_commit_graph_writer **out,
-	const char *objects_info_dir
-#ifdef GIT_EXPERIMENTAL_SHA256
-	, git_oid_t oid_type
-#endif
+	const char *objects_info_dir,
+	const git_commit_graph_writer_options *opts
 	)
 {
 	git_commit_graph_writer *w;
+	git_oid_t oid_type;
 
-#ifndef GIT_EXPERIMENTAL_SHA256
-	git_oid_t oid_type = GIT_OID_SHA1;
+#ifdef GIT_EXPERIMENTAL_SHA256
+	GIT_ERROR_CHECK_VERSION(opts,
+		GIT_COMMIT_GRAPH_WRITER_OPTIONS_VERSION,
+		"git_commit_graph_writer_options");
+
+	oid_type = opts && opts->oid_type ? opts->oid_type : GIT_OID_DEFAULT;
+	GIT_ASSERT_ARG(git_oid_type_is_valid(oid_type));
+#else
+	GIT_UNUSED(opts);
+	oid_type = GIT_OID_SHA1;
 #endif
 
-	GIT_ASSERT_ARG(out && objects_info_dir && oid_type);
+	GIT_ASSERT_ARG(out && objects_info_dir);
 
 	w = git__calloc(1, sizeof(git_commit_graph_writer));
 	GIT_ERROR_CHECK_ALLOC(w);
@@ -730,7 +758,7 @@ void git_commit_graph_writer_free(git_commit_graph_writer *w)
 
 	git_vector_foreach (&w->commits, i, packed_commit)
 		packed_commit_free(packed_commit);
-	git_vector_free(&w->commits);
+	git_vector_dispose(&w->commits);
 	git_str_dispose(&w->objects_info_dir);
 	git__free(w);
 }
@@ -775,9 +803,9 @@ static int object_entry__cb(const git_oid *id, void *data)
 }
 
 int git_commit_graph_writer_add_index_file(
-		git_commit_graph_writer *w,
-		git_repository *repo,
-		const char *idx_path)
+	git_commit_graph_writer *w,
+	git_repository *repo,
+	const char *idx_path)
 {
 	int error;
 	struct git_pack_file *p = NULL;
@@ -839,6 +867,8 @@ enum generation_number_commit_state {
 	GENERATION_NUMBER_COMMIT_STATE_VISITED = 3
 };
 
+GIT_HASHMAP_OID_SETUP(git_commit_graph_oidmap, struct packed_commit *);
+
 static int compute_generation_numbers(git_vector *commits)
 {
 	git_array_t(size_t) index_stack = GIT_ARRAY_INIT;
@@ -846,17 +876,14 @@ static int compute_generation_numbers(git_vector *commits)
 	size_t *parent_idx;
 	enum generation_number_commit_state *commit_states = NULL;
 	struct packed_commit *child_packed_commit;
-	git_oidmap *packed_commit_map = NULL;
+	git_commit_graph_oidmap packed_commit_map = GIT_HASHMAP_INIT;
 	int error = 0;
 
 	/* First populate the parent indices fields */
-	error = git_oidmap_new(&packed_commit_map);
-	if (error < 0)
-		goto cleanup;
 	git_vector_foreach (commits, i, child_packed_commit) {
 		child_packed_commit->index = i;
-		error = git_oidmap_set(
-				packed_commit_map, &child_packed_commit->sha1, child_packed_commit);
+		error = git_commit_graph_oidmap_put(&packed_commit_map,
+				&child_packed_commit->sha1, child_packed_commit);
 		if (error < 0)
 			goto cleanup;
 	}
@@ -874,8 +901,7 @@ static int compute_generation_numbers(git_vector *commits)
 			goto cleanup;
 		}
 		git_array_foreach (child_packed_commit->parents, parent_i, parent_id) {
-			parent_packed_commit = git_oidmap_get(packed_commit_map, parent_id);
-			if (!parent_packed_commit) {
+			if (git_commit_graph_oidmap_get(&parent_packed_commit, &packed_commit_map, parent_id) != 0) {
 				git_error_set(GIT_ERROR_ODB,
 					      "parent commit %s not found in commit graph",
 					      git_oid_tostr_s(parent_id));
@@ -975,7 +1001,7 @@ static int compute_generation_numbers(git_vector *commits)
 	}
 
 cleanup:
-	git_oidmap_free(packed_commit_map);
+	git_commit_graph_oidmap_dispose(&packed_commit_map);
 	git__free(commit_states);
 	git_array_clear(index_stack);
 
@@ -1029,9 +1055,12 @@ static int commit_graph_write_hash(const char *buf, size_t size, void *data)
 	struct commit_graph_write_hash_context *ctx = data;
 	int error;
 
-	error = git_hash_update(ctx->ctx, buf, size);
-	if (error < 0)
-		return error;
+	if (ctx->ctx) {
+		error = git_hash_update(ctx->ctx, buf, size);
+
+		if (error < 0)
+			return error;
+	}
 
 	return ctx->write_cb(buf, size, ctx->cb_data);
 }
@@ -1042,9 +1071,9 @@ static void packed_commit_free_dup(void *packed_commit)
 }
 
 static int commit_graph_write(
-		git_commit_graph_writer *w,
-		commit_graph_write_cb write_cb,
-		void *cb_data)
+	git_commit_graph_writer *w,
+	commit_graph_write_cb write_cb,
+	void *cb_data)
 {
 	int error = 0;
 	size_t i;
@@ -1227,6 +1256,9 @@ static int commit_graph_write(
 	error = git_hash_final(checksum, &ctx);
 	if (error < 0)
 		goto cleanup;
+
+	hash_cb_data.ctx = NULL;
+
 	error = write_cb((char *)checksum, checksum_size, cb_data);
 	if (error < 0)
 		goto cleanup;
@@ -1245,29 +1277,12 @@ static int commit_graph_write_filebuf(const char *buf, size_t size, void *data)
 	return git_filebuf_write(f, buf, size);
 }
 
-int git_commit_graph_writer_options_init(
-	git_commit_graph_writer_options *opts,
-	unsigned int version)
-{
-	GIT_INIT_STRUCTURE_FROM_TEMPLATE(
-			opts,
-			version,
-			git_commit_graph_writer_options,
-			GIT_COMMIT_GRAPH_WRITER_OPTIONS_INIT);
-	return 0;
-}
-
-int git_commit_graph_writer_commit(
-		git_commit_graph_writer *w,
-		git_commit_graph_writer_options *opts)
+int git_commit_graph_writer_commit(git_commit_graph_writer *w)
 {
 	int error;
 	int filebuf_flags = GIT_FILEBUF_DO_NOT_BUFFER;
 	git_str commit_graph_path = GIT_STR_INIT;
 	git_filebuf output = GIT_FILEBUF_INIT;
-
-	/* TODO: support options and fill in defaults. */
-	GIT_UNUSED(opts);
 
 	error = git_str_joinpath(
 			&commit_graph_path, git_str_cstr(&w->objects_info_dir), "commit-graph");
@@ -1292,18 +1307,14 @@ int git_commit_graph_writer_commit(
 
 int git_commit_graph_writer_dump(
 	git_buf *cgraph,
-	git_commit_graph_writer *w,
-	git_commit_graph_writer_options *opts)
+	git_commit_graph_writer *w)
 {
-	GIT_BUF_WRAP_PRIVATE(cgraph, git_commit_graph__writer_dump, w, opts);
+	GIT_BUF_WRAP_PRIVATE(cgraph, git_commit_graph__writer_dump, w);
 }
 
 int git_commit_graph__writer_dump(
 	git_str *cgraph,
-	git_commit_graph_writer *w,
-	git_commit_graph_writer_options *opts)
+	git_commit_graph_writer *w)
 {
-	/* TODO: support options. */
-	GIT_UNUSED(opts);
 	return commit_graph_write(w, commit_graph_write_buf, cgraph);
 }

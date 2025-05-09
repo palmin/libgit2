@@ -188,7 +188,7 @@ void test_revert_workdir__again(void)
 	cl_git_pass(git_tree_lookup(&reverted_tree, repo, &reverted_tree_oid));
 
 	cl_git_pass(git_signature_new(&signature, "Reverter", "reverter@example.org", time(NULL), 0));
-	cl_git_pass(git_commit_create(&reverted_commit_oid, repo, "HEAD", signature, signature, NULL, "Reverted!", reverted_tree, 1, &orig_head));
+	cl_git_pass(git_commit_create(&reverted_commit_oid, repo, "HEAD", signature, signature, NULL, "Reverted!", reverted_tree, 1, (const git_commit **)&orig_head));
 
 	cl_git_pass(git_revert(repo, orig_head, NULL));
 	cl_assert(merge_test_index(repo_index, merge_index_entries, 4));
@@ -238,7 +238,7 @@ void test_revert_workdir__again_after_automerge(void)
 	cl_git_pass(git_tree_lookup(&reverted_tree, repo, &reverted_tree_oid));
 
 	cl_git_pass(git_signature_new(&signature, "Reverter", "reverter@example.org", time(NULL), 0));
-	cl_git_pass(git_commit_create(&reverted_commit_oid, repo, "HEAD", signature, signature, NULL, "Reverted!", reverted_tree, 1, &head));
+	cl_git_pass(git_commit_create(&reverted_commit_oid, repo, "HEAD", signature, signature, NULL, "Reverted!", reverted_tree, 1, (const git_commit **)&head));
 
 	cl_git_pass(git_revert(repo, commit, NULL));
 	cl_assert(merge_test_index(repo_index, second_revert_entries, 6));
@@ -287,7 +287,7 @@ void test_revert_workdir__again_after_edit(void)
 	cl_git_pass(git_tree_lookup(&reverted_tree, repo, &reverted_tree_oid));
 
 	cl_git_pass(git_signature_new(&signature, "Reverter", "reverter@example.org", time(NULL), 0));
-	cl_git_pass(git_commit_create(&reverted_commit_oid, repo, "HEAD", signature, signature, NULL, "Reverted!", reverted_tree, 1, &orig_head));
+	cl_git_pass(git_commit_create(&reverted_commit_oid, repo, "HEAD", signature, signature, NULL, "Reverted!", reverted_tree, 1, (const git_commit **)&orig_head));
 
 	cl_git_pass(git_revert(repo, commit, NULL));
 	cl_assert(merge_test_index(repo_index, merge_index_entries, 4));
@@ -374,7 +374,7 @@ void test_revert_workdir__conflict_use_ours(void)
 		{ 0100644, "0f5bfcf58c558d865da6be0281d7795993646cee", 0, "file6.txt" },
 	};
 
-	opts.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE | GIT_CHECKOUT_USE_OURS;
+	opts.checkout_opts.checkout_strategy = GIT_CHECKOUT_USE_OURS;
 
 	git_oid__fromstr(&head_oid, "72333f47d4e83616630ff3b0ffe4c0faebcc3c45", GIT_OID_SHA1);
 	cl_git_pass(git_commit_lookup(&head, repo, &head_oid));

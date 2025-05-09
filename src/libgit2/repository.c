@@ -34,7 +34,6 @@
 #include "submodule.h"
 #include "worktree.h"
 #include "path.h"
-#include "strmap.h"
 
 #ifdef GIT_WIN32
 # include "win32/w32_util.h"
@@ -336,6 +335,8 @@ int git_repository__new(git_repository **out, git_oid_t oid_type)
 	*out = repo = repository_alloc();
 	GIT_ERROR_CHECK_ALLOC(repo);
 
+	GIT_ASSERT_ARG(git_oid_type_is_valid(oid_type));
+
 	repo->is_bare = 1;
 	repo->is_worktree = 0;
 	repo->oid_type = oid_type;
@@ -344,9 +345,9 @@ int git_repository__new(git_repository **out, git_oid_t oid_type)
 }
 
 #ifdef GIT_EXPERIMENTAL_SHA256
-int git_repository_new(git_repository **out, git_oid_t oid_type)
+int git_repository_new(git_repository **out, git_repository_new_options *opts)
 {
-	return git_repository__new(out, oid_type);
+	return git_repository__new(out, opts && opts->oid_type ? opts->oid_type : GIT_OID_DEFAULT);
 }
 #else
 int git_repository_new(git_repository** out)
@@ -1222,38 +1223,21 @@ out:
 	return err;
 }
 
-int git_repository__wrap_odb(
-	git_repository **out,
-	git_odb *odb,
-	git_oid_t oid_type)
+int git_repository_wrap_odb(git_repository **out, git_odb *odb)
 {
 	git_repository *repo;
 
 	repo = repository_alloc();
 	GIT_ERROR_CHECK_ALLOC(repo);
 
-	repo->oid_type = oid_type;
+	GIT_ASSERT(git_oid_type_is_valid(odb->options.oid_type));
+	repo->oid_type = odb->options.oid_type;
 
 	git_repository_set_odb(repo, odb);
 	*out = repo;
 
 	return 0;
 }
-
-#ifdef GIT_EXPERIMENTAL_SHA256
-int git_repository_wrap_odb(
-	git_repository **out,
-	git_odb *odb,
-	git_oid_t oid_type)
-{
-	return git_repository__wrap_odb(out, odb, oid_type);
-}
-#else
-int git_repository_wrap_odb(git_repository **out, git_odb *odb)
-{
-	return git_repository__wrap_odb(out, odb, GIT_OID_DEFAULT);
-}
-#endif
 
 int git_repository_discover(
 	git_buf *out,
@@ -1881,6 +1865,7 @@ static const char *builtin_extensions[] = {
 	"noop",
 	"objectformat",
 	"worktreeconfig",
+	"preciousobjects"
 };
 
 static git_vector user_extensions = { 0, git__strcmp_cb };
@@ -2106,7 +2091,7 @@ int git_repository__set_extensions(const char **extensions, size_t len)
 
 void git_repository__free_extensions(void)
 {
-	git_vector_free_deep(&user_extensions);
+	git_vector_dispose_deep(&user_extensions);
 }
 
 int git_repository_create_head(const char *git_dir, const char *ref_name)
@@ -2521,7 +2506,7 @@ static int repo_write_gitlink(
 		error = git_fs_path_make_relative(&path_to_repo, in_dir);
 
 	if (!error)
-		error = git_str_join(&buf, ' ', GIT_FILE_CONTENT_PREFIX, path_to_repo.ptr);
+		error = git_str_printf(&buf, "%s %s\n", GIT_FILE_CONTENT_PREFIX, path_to_repo.ptr);
 
 	if (!error)
 		error = repo_write_template(in_dir, true, DOT_GIT, 0666, true, buf.ptr);
@@ -2553,7 +2538,8 @@ static int repo_init_structure(
 	int error = 0;
 	repo_template_item *tpl;
 	bool external_tpl =
-		((opts->flags & GIT_REPOSITORY_INIT_EXTERNAL_TEMPLATE) != 0);
+		 opts->template_path != NULL ||
+		(opts->flags & GIT_REPOSITORY_INIT_EXTERNAL_TEMPLATE) != 0;
 	mode_t dmode = pick_dir_mode(opts);
 	bool chmod = opts->mode != GIT_REPOSITORY_INIT_SHARED_UMASK;
 
@@ -4007,5 +3993,29 @@ done:
 		git__free(commit);
 
 	git_reference_free(head_ref);
+	return error;
+}
+
+int git_repository__abbrev_length(int *out, git_repository *repo)
+{
+	size_t oid_hexsize;
+	int len;
+	int error;
+
+	oid_hexsize = git_oid_hexsize(repo->oid_type);
+
+	if ((error = git_repository__configmap_lookup(&len, repo, GIT_CONFIGMAP_ABBREV)) < 0)
+		return error;
+
+	if (len < GIT_ABBREV_MINIMUM) {
+		git_error_set(GIT_ERROR_CONFIG, "invalid oid abbreviation setting: '%d'", len);
+		return -1;
+	}
+
+	if (len == GIT_ABBREV_FALSE || (size_t)len > oid_hexsize)
+		len = (int)oid_hexsize;
+
+	*out = len;
+
 	return error;
 }

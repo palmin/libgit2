@@ -120,8 +120,8 @@ static int ssh_stream_read(
 	size_t buf_size,
 	size_t *bytes_read)
 {
-	int rc;
 	ssh_stream *s = GIT_CONTAINER_OF(stream, ssh_stream, parent);
+	ssize_t rc;
 
 	*bytes_read = 0;
 
@@ -140,14 +140,13 @@ static int ssh_stream_read(
 	 */
 	if (rc == 0) {
 		if ((rc = libssh2_channel_read_stderr(s->channel, buffer, buf_size)) > 0) {
-			git_error_set(GIT_ERROR_SSH, "%*s", rc, buffer);
+			git_error_set(GIT_ERROR_SSH, "%*s", (int)rc, buffer);
 			return GIT_EEOF;
 		} else if (rc < LIBSSH2_ERROR_NONE) {
 			ssh_error(s->session, "SSH could not read stderr");
 			return -1;
 		}
 	}
-
 
 	*bytes_read = rc;
 
@@ -383,8 +382,8 @@ static int _git_ssh_authenticate_session(
 			return GIT_EAUTH;
 
 	if (rc != LIBSSH2_ERROR_NONE) {
-		if (!git_error_last())
-			ssh_error(session, "Failed to authenticate SSH session");
+		if (git_error_last()->klass == GIT_ERROR_NONE)
+			ssh_error(session, "failed to authenticate SSH session");
 		return -1;
 	}
 
@@ -524,6 +523,8 @@ static void find_hostkey_preference(
 	add_hostkey_pref_if_avail(known_hosts, hostname, port, prefs, LIBSSH2_KNOWNHOST_KEY_ECDSA_384, "ecdsa-sha2-nistp384");
 	add_hostkey_pref_if_avail(known_hosts, hostname, port, prefs, LIBSSH2_KNOWNHOST_KEY_ECDSA_521, "ecdsa-sha2-nistp521");
 #endif
+	add_hostkey_pref_if_avail(known_hosts, hostname, port, prefs, LIBSSH2_KNOWNHOST_KEY_SSHRSA, "rsa-sha2-512");
+	add_hostkey_pref_if_avail(known_hosts, hostname, port, prefs, LIBSSH2_KNOWNHOST_KEY_SSHRSA, "rsa-sha2-256");
 	add_hostkey_pref_if_avail(known_hosts, hostname, port, prefs, LIBSSH2_KNOWNHOST_KEY_SSHRSA, "ssh-rsa");
 }
 
@@ -1044,7 +1045,8 @@ static int list_auth_methods(int *out, LIBSSH2_SESSION *session, const char *use
 
 	*out = 0;
 
-	list = libssh2_userauth_list(session, username, strlen(username));
+	list = libssh2_userauth_list(session, username,
+			(unsigned int)strlen(username));
 
 	/* either error, or the remote accepts NONE auth, which is bizarre, let's punt */
 	if (list == NULL && !libssh2_userauth_authenticated(session)) {

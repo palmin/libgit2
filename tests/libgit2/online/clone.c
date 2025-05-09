@@ -73,7 +73,6 @@ void test_online_clone__initialize(void)
 	memset(&g_options, 0, sizeof(git_clone_options));
 	g_options.version = GIT_CLONE_OPTIONS_VERSION;
 	g_options.checkout_opts = dummy_opts;
-	g_options.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
 	g_options.fetch_opts = dummy_fetch;
 	g_options.fetch_opts.callbacks.certificate_check = ssl_cert;
 
@@ -249,7 +248,6 @@ void test_online_clone__can_checkout_a_cloned_repo(void)
 	bool checkout_progress_cb_was_called = false,
 		  fetch_progress_cb_was_called = false;
 
-	g_options.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
 	g_options.checkout_opts.progress_cb = &checkout_progress;
 	g_options.checkout_opts.progress_payload = &checkout_progress_cb_was_called;
 	g_options.fetch_opts.callbacks.transfer_progress = &fetch_progress;
@@ -319,10 +317,10 @@ void test_online_clone__clone_mirror(void)
 	cl_fixture_cleanup("./foo.git");
 }
 
-static int update_tips(const char *refname, const git_oid *a, const git_oid *b, void *payload)
+static int update_refs(const char *refname, const git_oid *a, const git_oid *b, git_refspec *spec, void *payload)
 {
 	int *callcount = (int*)payload;
-	GIT_UNUSED(refname); GIT_UNUSED(a); GIT_UNUSED(b);
+	GIT_UNUSED(refname); GIT_UNUSED(a); GIT_UNUSED(b); GIT_UNUSED(spec);
 	*callcount = *callcount + 1;
 	return 0;
 }
@@ -331,7 +329,7 @@ void test_online_clone__custom_remote_callbacks(void)
 {
 	int callcount = 0;
 
-	g_options.fetch_opts.callbacks.update_tips = update_tips;
+	g_options.fetch_opts.callbacks.update_refs = update_refs;
 	g_options.fetch_opts.callbacks.payload = &callcount;
 
 	cl_git_pass(git_clone(&g_repo, LIVE_REPO_URL, "./foo", &g_options));
@@ -665,7 +663,7 @@ static int github_credentials(
 
 void test_online_clone__ssh_github(void)
 {
-#if !defined(GIT_SSH) || !defined(GIT_SSH_MEMORY_CREDENTIALS)
+#if !defined(GIT_SSH) || !defined(GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS)
 	clar__skip();
 #endif
 
@@ -676,6 +674,24 @@ void test_online_clone__ssh_github(void)
 
 	g_options.fetch_opts.callbacks.credentials = github_credentials;
 	g_options.fetch_opts.callbacks.certificate_check = succeed_certificate_check;
+
+	cl_git_pass(git_clone(&g_repo, SSH_REPO_URL, "./foo", &g_options));
+}
+
+void test_online_clone__ssh_github_shallow(void)
+{
+#if !defined(GIT_SSH) || !defined(GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS)
+	clar__skip();
+#endif
+
+	if (!_github_ssh_pubkey || !_github_ssh_privkey)
+		clar__skip();
+
+	cl_fake_homedir(NULL);
+
+	g_options.fetch_opts.callbacks.credentials = github_credentials;
+	g_options.fetch_opts.callbacks.certificate_check = succeed_certificate_check;
+	g_options.fetch_opts.depth = 1;
 
 	cl_git_pass(git_clone(&g_repo, SSH_REPO_URL, "./foo", &g_options));
 }
@@ -706,7 +722,7 @@ void test_online_clone__ssh_auth_methods(void)
  */
 void test_online_clone__ssh_certcheck_accepts_unknown(void)
 {
-#if !defined(GIT_SSH_LIBSSH2) || !defined(GIT_SSH_MEMORY_CREDENTIALS)
+#if !defined(GIT_SSH_LIBSSH2) || !defined(GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS)
 	clar__skip();
 #endif
 
@@ -735,7 +751,7 @@ void test_online_clone__ssh_certcheck_override_knownhosts(void)
 {
 	git_str knownhostsfile = GIT_STR_INIT;
 
-#if !defined(GIT_SSH) || !defined(GIT_SSH_MEMORY_CREDENTIALS)
+#if !defined(GIT_SSH) || !defined(GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS)
 	clar__skip();
 #endif
 
@@ -929,7 +945,7 @@ static int ssh_memory_cred_cb(git_credential **cred, const char *url, const char
 
 void test_online_clone__ssh_memory_auth(void)
 {
-#ifndef GIT_SSH_MEMORY_CREDENTIALS
+#ifndef GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS
 	clar__skip();
 #endif
 	if (!_remote_url || !_remote_user || !_remote_ssh_privkey || strncmp(_remote_url, "ssh://", 5) != 0)

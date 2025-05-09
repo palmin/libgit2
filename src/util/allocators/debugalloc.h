@@ -4,12 +4,14 @@
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
  */
-#ifndef INCLUDE_libgit2_h__
-#define INCLUDE_libgit2_h__
 
-extern int git_libgit2_init_count(void);
+#ifndef INCLUDE_allocators_debugalloc_h__
+#define INCLUDE_allocators_debugalloc_h__
 
-extern const char *git_libgit2__user_agent(void);
-extern const char *git_libgit2__ssl_ciphers(void);
+#include "git2_util.h"
+
+#include "alloc.h"
+
+int git_debugalloc_init_allocator(git_allocator *allocator);
 
 #endif

@@ -77,7 +77,7 @@ void test_cherrypick_workdir__automerge(void)
 		cl_git_pass(git_index_write_tree(&cherrypicked_tree_oid, repo_index));
 		cl_git_pass(git_tree_lookup(&cherrypicked_tree, repo, &cherrypicked_tree_oid));
 		cl_git_pass(git_commit_create(&cherrypicked_oid, repo, "HEAD", signature, signature, NULL,
-			"Cherry picked!", cherrypicked_tree, 1, &head));
+			"Cherry picked!", cherrypicked_tree, 1, (const git_commit **)&head));
 
 		cl_assert(merge_test_index(repo_index, merge_index_entries + i * 3, 3));
 
@@ -257,7 +257,7 @@ void test_cherrypick_workdir__conflict_use_ours(void)
 	};
 
 	/* leave the index in a conflicted state, but checkout "ours" to the workdir */
-	opts.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE | GIT_CHECKOUT_USE_OURS;
+	opts.checkout_opts.checkout_strategy = GIT_CHECKOUT_USE_OURS;
 
 	git_oid__fromstr(&head_oid, "bafbf6912c09505ac60575cd43d3f2aba3bd84d8", GIT_OID_SHA1);
 

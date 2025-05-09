@@ -15,7 +15,12 @@
 #include "process.h"
 #include "strlist.h"
 
-extern char **environ;
+#ifdef __APPLE__
+	#include <crt_externs.h>
+	#define environ (*_NSGetEnviron())
+#else
+	extern char **environ;
+#endif
 
 struct git_process {
 	char **args;
@@ -99,7 +104,7 @@ static int merge_env(
 	return 0;
 
 on_error:
-	git_vector_free_deep(&merged);
+	git_vector_dispose_deep(&merged);
 	return error;
 }
 
