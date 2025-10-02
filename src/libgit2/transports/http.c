@@ -45,6 +45,11 @@ typedef struct {
 	const http_service *service;
 	http_state state;
 	unsigned replay_count;
+	git_str post_body;
+	size_t post_body_len;
+	int post_body_fd;
+	git_str post_body_path;
+	bool using_temp_file;
 } http_stream;
 
 typedef struct {
@@ -91,13 +96,15 @@ static const http_service receive_pack_service = {
 	"application/x-git-receive-pack-request",
 	"application/x-git-receive-pack-result",
 	0,
-	1
+	0
 };
 
 #define SERVER_TYPE_REMOTE "remote"
 #define SERVER_TYPE_PROXY  "proxy"
 
 #define OWNING_SUBTRANSPORT(s) ((http_subtransport *)(s)->parent.subtransport)
+
+#define HTTP_BUFFER_THRESHOLD (50 * 1024) /* 50KB threshold for switching to temp file */
 
 static int apply_url_credentials(
 	git_credential **cred,
@@ -523,7 +530,7 @@ done:
 * (ie, when stream->state == HTTP_STATE_NONE), we'll send a POST request
 * to the remote host.  If we're sending chunked data, then subsequent calls
 * will write the additional data given in the buffer.  If we're not chunking,
-* then the caller should have given us all the data in the original call.
+* we buffer all the data until http_stream_read_response is called.
 * The caller should call http_stream_read_response to get the result.
 */
 static int http_stream_write(
@@ -538,6 +545,68 @@ static int http_stream_write(
 	git_http_response response = {0};
 	int error;
 
+	/* If not chunked, buffer the data for later */
+	if (!stream->service->chunked) {
+		/* Check if we need to switch to temp file buffering */
+		if (stream->post_body_len + len > HTTP_BUFFER_THRESHOLD) {
+			/* Transition from memory to temp file if not already using one */
+			if (!stream->using_temp_file) {
+				char temp_template[] = "git_http_XXXXXX";
+				ssize_t written;
+
+				/* Create temp file */
+				stream->post_body_fd = mkstemp(temp_template);
+				if (stream->post_body_fd < 0) {
+					git_error_set(GIT_ERROR_OS, "failed to create temporary file for HTTP POST");
+					return -1;
+				}
+
+				/* Save temp file path for cleanup */
+				if (git_str_sets(&stream->post_body_path, temp_template) < 0) {
+					p_close(stream->post_body_fd);
+					stream->post_body_fd = -1;
+					return -1;
+				}
+
+				/* Write existing memory buffer to file */
+				if (stream->post_body_len > 0) {
+					written = p_write(stream->post_body_fd,
+						git_str_cstr(&stream->post_body),
+						stream->post_body_len);
+
+					if (written < 0 || (size_t)written != stream->post_body_len) {
+						git_error_set(GIT_ERROR_OS, "failed to write to temporary file");
+						p_close(stream->post_body_fd);
+						p_unlink(git_str_cstr(&stream->post_body_path));
+						stream->post_body_fd = -1;
+						return -1;
+					}
+				}
+
+				/* Clear memory buffer and mark as using temp file */
+				git_str_dispose(&stream->post_body);
+				stream->using_temp_file = true;
+			}
+
+			/* Write new data to temp file */
+			{
+				ssize_t written = p_write(stream->post_body_fd, buffer, len);
+				if (written < 0 || (size_t)written != len) {
+					git_error_set(GIT_ERROR_OS, "failed to write to temporary file");
+					return -1;
+				}
+			}
+		} else {
+			/* Still under threshold, buffer in memory */
+			if ((error = git_str_put(&stream->post_body, buffer, len)) < 0)
+				return error;
+		}
+
+		stream->post_body_len += len;
+		return 0;
+	}
+
+	/* Chunked transfer - send immediately */
 	while (stream->state == HTTP_STATE_NONE &&
 	       stream->replay_count < GIT_HTTP_REPLAY_MAX) {
 
@@ -612,11 +681,97 @@ static int http_stream_read_response(
 	http_stream *stream = (http_stream *)s;
 	http_subtransport *transport = OWNING_SUBTRANSPORT(stream);
 	git_http_client *client = transport->http_client;
+	git_net_url url = GIT_NET_URL_INIT;
+	git_http_request request = {0};
 	git_http_response response = {0};
 	bool complete;
 	int error;
 
 	*out_len = 0;
+
+	/* If we buffered data, send it now */
+	if (stream->state == HTTP_STATE_NONE && stream->post_body_len > 0) {
+		while (stream->state == HTTP_STATE_NONE &&
+		       stream->replay_count < GIT_HTTP_REPLAY_MAX) {
+
+			git_net_url_dispose(&url);
+			git_http_response_dispose(&response);
+
+			/*
+			 * If we're authenticating with a connection-based mechanism
+			 * (NTLM, Kerberos), send a "probe" packet.  Servers SHOULD
+			 * authenticate an entire keep-alive connection, so ideally
+			 * we should not need to authenticate but some servers do
+			 * not support this.  By sending a probe packet, we'll be
+			 * able to follow up with a second POST using the actual
+			 * data (and, in the degenerate case, the authentication
+			 * header as well).
+			 */
+			if (needs_probe(stream) && (error = send_probe(stream)) < 0)
+				goto done;
+
+			/* Send the regular POST request with buffered data */
+			if ((error = generate_request(&url, &request, stream, stream->post_body_len)) < 0 ||
+			    (error = git_http_client_send_request(client, &request)) < 0)
+				goto done;
+
+			if (request.expect_continue &&
+			    git_http_client_has_response(client)) {
+				/*
+				 * If we got a response to an expect/continue, then
+				 * it's something other than a 100 and we should
+				 * deal with the response somehow.
+				 */
+				if ((error = git_http_client_read_response(&response, client)) < 0 ||
+				    (error = handle_response(&complete, stream, &response, true)) < 0)
+				    goto done;
+			} else {
+				stream->state = HTTP_STATE_SENDING_REQUEST;
+			}
+
+			stream->replay_count++;
+		}
+
+		if (stream->state == HTTP_STATE_NONE) {
+			git_error_set(GIT_ERROR_HTTP,
+			              "too many redirects or authentication replays");
+			error = GIT_ERROR;
+			goto done;
+		}
+
+		GIT_ASSERT(stream->state == HTTP_STATE_SENDING_REQUEST);
+
+		/* Send the buffered body */
+		if (stream->using_temp_file) {
+			/* Read from temp file and send in chunks */
+			char chunk_buffer[65536];
+			ssize_t bytes_read;
+
+			/* Seek to beginning of temp file */
+			if (p_lseek(stream->post_body_fd, 0, SEEK_SET) < 0) {
+				git_error_set(GIT_ERROR_OS, "failed to seek temporary file");
+				error = -1;
+				goto done;
+			}
+
+			/* Read and send file in chunks */
+			while ((bytes_read = p_read(stream->post_body_fd, chunk_buffer, sizeof(chunk_buffer))) > 0) {
+				if ((error = git_http_client_send_body(client, chunk_buffer, bytes_read)) < 0)
+					goto done;
+			}
+
+			if (bytes_read < 0) {
+				git_error_set(GIT_ERROR_OS, "failed to read temporary file");
+				error = -1;
+				goto done;
+			}
+		} else {
+			/* Send memory buffer */
+			if ((error = git_http_client_send_body(client,
+			    git_str_cstr(&stream->post_body), stream->post_body_len)) < 0)
+				goto done;
+		}
+	}
 
 	if (stream->state == HTTP_STATE_SENDING_REQUEST) {
 		if ((error = git_http_client_read_response(&response, client)) < 0 ||
@@ -635,6 +790,7 @@ static int http_stream_read_response(
 	}
 
 done:
+	git_net_url_dispose(&url);
 	git_http_response_dispose(&response);
 	return error;
 }
@@ -642,6 +798,18 @@ done:
 static void http_stream_free(git_smart_subtransport_stream *stream)
 {
 	http_stream *s = GIT_CONTAINER_OF(stream, http_stream, parent);
+
+	git_str_dispose(&s->post_body);
+
+	if (s->using_temp_file && s->post_body_fd >= 0) {
+		p_close(s->post_body_fd);
+
+		/* Clean up temp file if path was saved */
+		if (git_str_len(&s->post_body_path) > 0)
+			p_unlink(git_str_cstr(&s->post_body_path));
+	}
+
+	git_str_dispose(&s->post_body_path);
 	git__free(s);
 }
 
@@ -697,6 +865,8 @@ static int http_action(
 
 	stream = git__calloc(sizeof(http_stream), 1);
 	GIT_ERROR_CHECK_ALLOC(stream);
+
+	stream->post_body_fd = -1;  /* Initialize to invalid fd */
 
 	opts.server_certificate_check_cb = connect_opts->callbacks.certificate_check;
 	opts.server_certificate_check_payload = connect_opts->callbacks.payload;
