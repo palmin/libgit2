@@ -178,8 +178,18 @@ GIT_INLINE(int) handle_remote_auth(
 {
 	http_subtransport *transport = OWNING_SUBTRANSPORT(stream);
 	git_remote_connect_options *connect_opts = &transport->owner->connect_opts;
+	unsigned int credtypes = response->server_auth_credtypes;
+	unsigned int schemetypes = response->server_auth_schemetypes;
 
-	if (response->server_auth_credtypes == 0) {
+	/* If we've already tried URL credentials and the server isn't sending
+	 * auth headers anymore, assume it still supports the same auth types
+	 * we saw before, so we can try the callback. */
+	if (credtypes == 0 && transport->server.url_cred_presented && transport->server.auth_schemetypes) {
+		credtypes = GIT_CREDENTIAL_USERPASS_PLAINTEXT;
+		schemetypes = transport->server.auth_schemetypes;
+	}
+
+	if (credtypes == 0) {
 		git_error_set(GIT_ERROR_HTTP, "server requires authentication that we do not support");
 		return GIT_EAUTH;
 	}
@@ -189,8 +199,8 @@ GIT_INLINE(int) handle_remote_auth(
 		&transport->server,
 		SERVER_TYPE_REMOTE,
 		transport->owner->url,
-		response->server_auth_schemetypes,
-		response->server_auth_credtypes,
+		schemetypes,
+		credtypes,
 		connect_opts->callbacks.credentials,
 		connect_opts->callbacks.payload);
 }
