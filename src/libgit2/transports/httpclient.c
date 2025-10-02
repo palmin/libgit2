@@ -1354,7 +1354,7 @@ int git_http_client_send_body(
 	size_t buffer_len)
 {
 	git_http_server *server;
-	git_str hdr = GIT_STR_INIT;
+	git_str chunk = GIT_STR_INIT;
 	int error;
 
 	GIT_ASSERT_ARG(client);
@@ -1381,15 +1381,20 @@ int git_http_client_send_body(
 
 		client->request_body_remain -= buffer_len;
 	} else {
-		if ((error = git_str_printf(&hdr, "%" PRIxZ "\r\n", buffer_len)) < 0 ||
-		    (error = stream_write(server, hdr.ptr, hdr.size)) < 0 ||
-		    (error = stream_write(server, buffer, buffer_len)) < 0 ||
-		    (error = stream_write(server, "\r\n", 2)) < 0)
+		/* For chunked encoding, buffer the entire chunk before sending
+		 * to avoid fragmenting into multiple tiny network writes */
+		if ((error = git_str_printf(&chunk, "%" PRIxZ "\r\n", buffer_len)) < 0 ||
+		    (error = git_str_put(&chunk, buffer, buffer_len)) < 0 ||
+		    (error = git_str_puts(&chunk, "\r\n")) < 0)
+			goto done;
+
+		/* Send the complete chunk (size + data + CRLF) in a single write */
+		if ((error = stream_write(server, chunk.ptr, chunk.size)) < 0)
 			goto done;
 	}
 
 done:
-	git_str_dispose(&hdr);
+	git_str_dispose(&chunk);
 	return error;
 }
 
