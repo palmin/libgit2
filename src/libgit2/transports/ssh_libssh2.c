@@ -21,6 +21,7 @@ extern void cocoa_socket_free(void** context);
 #include "process.h"
 #include "streams/socket.h"
 #include "sysdir.h"
+#include "trace.h"
 
 #include "git2/credential.h"
 #include "git2/sys/credential.h"
@@ -101,6 +102,8 @@ static int send_command(ssh_stream *s)
 	if (error < 0)
 		goto cleanup;
 
+	git_trace(GIT_TRACE_TRACE, "SSH: Executing command: %s", request.ptr);
+
 	error = libssh2_channel_exec(s->channel, request.ptr);
 	if (error < LIBSSH2_ERROR_NONE) {
 		ssh_error(s->session, "SSH could not execute request");
@@ -148,6 +151,10 @@ static int ssh_stream_read(
 		}
 	}
 
+	if (rc > 0) {
+		git_trace(GIT_TRACE_TRACE, "SSH: Received %d bytes", (int)rc);
+	}
+
 	*bytes_read = rc;
 
 	return 0;
@@ -164,6 +171,8 @@ static int ssh_stream_write(
 
 	if (!s->sent_command && send_command(s) < 0)
 		return -1;
+
+	git_trace(GIT_TRACE_TRACE, "SSH: Sending %d bytes", (int)len);
 
 	do {
 		ret = libssh2_channel_write(s->channel, buffer + off, len - off);
@@ -308,24 +317,29 @@ static int _git_ssh_authenticate_session(
 		switch (cred->credtype) {
 		case GIT_CREDENTIAL_USERPASS_PLAINTEXT: {
 			git_credential_userpass_plaintext *c = (git_credential_userpass_plaintext *)cred;
+			git_trace(GIT_TRACE_DEBUG, "SSH: Authenticating with password for user '%s'", c->username);
 			rc = libssh2_userauth_password(session, c->username, c->password);
 			break;
 		}
 		case GIT_CREDENTIAL_SSH_KEY: {
 			git_credential_ssh_key *c = (git_credential_ssh_key *)cred;
 
-			if (c->privatekey)
+			if (c->privatekey) {
+				git_trace(GIT_TRACE_DEBUG, "SSH: Authenticating with SSH key from file for user '%s'", c->username);
 				rc = libssh2_userauth_publickey_fromfile(
 					session, c->username, c->publickey,
 					c->privatekey, c->passphrase);
-			else
+			} else {
+				git_trace(GIT_TRACE_DEBUG, "SSH: Authenticating with SSH agent for user '%s'", c->username);
 				rc = ssh_agent_auth(session, c);
+			}
 
 			break;
 		}
 		case GIT_CREDENTIAL_SSH_CUSTOM: {
 			git_credential_ssh_custom *c = (git_credential_ssh_custom *)cred;
 
+			git_trace(GIT_TRACE_DEBUG, "SSH: Authenticating with custom SSH callback for user '%s'", c->username);
 			rc = libssh2_userauth_publickey(
 				session, c->username, (const unsigned char *)c->publickey,
 				c->publickey_len, c->sign_callback, &c->payload);
@@ -334,6 +348,8 @@ static int _git_ssh_authenticate_session(
 		case GIT_CREDENTIAL_SSH_INTERACTIVE: {
 			void **abstract = libssh2_session_abstract(session);
 			git_credential_ssh_interactive *c = (git_credential_ssh_interactive *)cred;
+
+			git_trace(GIT_TRACE_DEBUG, "SSH: Authenticating with keyboard-interactive for user '%s'", c->username);
 
 			/* ideally, we should be able to set this by calling
 			 * libssh2_session_init_ex() instead of libssh2_session_init().
@@ -359,6 +375,7 @@ static int _git_ssh_authenticate_session(
 			GIT_ASSERT(c->username);
 			GIT_ASSERT(c->privatekey);
 
+			git_trace(GIT_TRACE_DEBUG, "SSH: Authenticating with SSH key from memory for user '%s'", c->username);
 			rc = libssh2_userauth_publickey_frommemory(
 				session,
 				c->username,
@@ -378,8 +395,10 @@ static int _git_ssh_authenticate_session(
 
 	if (rc == LIBSSH2_ERROR_PASSWORD_EXPIRED ||
 		rc == LIBSSH2_ERROR_AUTHENTICATION_FAILED ||
-		rc == LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED)
+		rc == LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED) {
+			git_trace(GIT_TRACE_DEBUG, "SSH: Authentication failed");
 			return GIT_EAUTH;
+	}
 
 	if (rc != LIBSSH2_ERROR_NONE) {
 		if (git_error_last()->klass == GIT_ERROR_NONE)
@@ -387,6 +406,7 @@ static int _git_ssh_authenticate_session(
 		return -1;
 	}
 
+	git_trace(GIT_TRACE_DEBUG, "SSH: Authentication successful");
 	return 0;
 }
 
@@ -544,6 +564,8 @@ static int _git_ssh_session_create(
 	GIT_ASSERT_ARG(session);
 	GIT_ASSERT_ARG(hosts);
 
+	git_trace(GIT_TRACE_DEBUG, "SSH: Creating SSH session for %s:%d", hostname, port);
+
 	s = libssh2_session_init();
 	if (!s) {
 		git_error_set(GIT_ERROR_NET, "failed to initialize SSH session");
@@ -562,6 +584,7 @@ static int _git_ssh_session_create(
 
 	find_hostkey_preference(known_hosts, hostname, port, &prefs);
 	if (git_str_len(&prefs) > 0) {
+		git_trace(GIT_TRACE_DEBUG, "SSH: Setting hostkey preference: %s", git_str_cstr(&prefs));
 		do {
 			rc = libssh2_session_method_pref(s, LIBSSH2_METHOD_HOSTKEY, git_str_cstr(&prefs));
 		} while (LIBSSH2_ERROR_EAGAIN == rc || LIBSSH2_ERROR_TIMEOUT == rc);
@@ -572,6 +595,7 @@ static int _git_ssh_session_create(
 	}
 	git_str_dispose(&prefs);
 
+	git_trace(GIT_TRACE_DEBUG, "SSH: Starting SSH handshake");
 	do {
 		rc = libssh2_session_handshake(s, socket->s);
 	} while (LIBSSH2_ERROR_EAGAIN == rc || LIBSSH2_ERROR_TIMEOUT == rc);
@@ -582,6 +606,8 @@ static int _git_ssh_session_create(
 	}
 
 	libssh2_session_set_blocking(s, 1);
+
+	git_trace(GIT_TRACE_DEBUG, "SSH: SSH handshake complete");
 
 	*session = s;
 	*hosts = known_hosts;
@@ -777,6 +803,9 @@ static int check_certificate(
 static int _ssh_socket_connect(ssh_stream *s) {
 	git_socket_stream* st = (git_socket_stream*)s->io;
 	char const* error_reason = NULL;
+
+	git_trace(GIT_TRACE_DEBUG, "SSH: Connecting to %s port %s", st->host, st->port);
+
 	int sock = cocoa_socket_connect(&s->cocoa_context, st->host,
 	                                st->port, &error_reason);
 	if(sock == INVALID_SOCKET) {
@@ -786,6 +815,7 @@ static int _ssh_socket_connect(ssh_stream *s) {
 	}
 
 	st->s = sock;
+	git_trace(GIT_TRACE_DEBUG, "SSH: Socket connected");
 	return 0;
 }
 
@@ -905,6 +935,7 @@ static int _git_ssh_setup_conn(
 	if (error < 0)
 		goto done;
 
+	git_trace(GIT_TRACE_DEBUG, "SSH: Opening SSH channel");
 	channel = libssh2_channel_open_session(session);
 	if (!channel) {
 		error = -1;
@@ -916,6 +947,8 @@ static int _git_ssh_setup_conn(
 
 	s->session = session;
 	s->channel = channel;
+
+	git_trace(GIT_TRACE_DEBUG, "SSH: SSH channel opened successfully");
 
 	t->current_stream = s;
 
