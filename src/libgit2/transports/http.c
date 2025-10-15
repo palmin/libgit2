@@ -104,7 +104,7 @@ static const http_service receive_pack_service = {
 
 #define OWNING_SUBTRANSPORT(s) ((http_subtransport *)(s)->parent.subtransport)
 
-#define HTTP_BUFFER_THRESHOLD (50 * 1024) /* 50KB threshold for switching to temp file */
+#define HTTP_BUFFER_THRESHOLD (64 * 1024) /* 64KB threshold for switching to temp file */
 
 static int apply_url_credentials(
 	git_credential **cred,
@@ -553,6 +553,7 @@ static int http_stream_write(
 			if (!stream->using_temp_file) {
 				char temp_template[GIT_PATH_MAX];
 				const char *tmpdir;
+				size_t tmpdir_len;
 				ssize_t written;
 
 				/* Get temporary directory from TMPDIR environment variable */
@@ -560,9 +561,14 @@ static int http_stream_write(
 				if (!tmpdir || !tmpdir[0])
 					tmpdir = "/tmp";
 
+				/* Remove trailing slash if present */
+				tmpdir_len = strlen(tmpdir);
+				if (tmpdir_len > 0 && tmpdir[tmpdir_len - 1] == '/')
+					tmpdir_len--;
+
 				/* Create temp file template with directory prefix */
 				if (snprintf(temp_template, sizeof(temp_template),
-					     "%s/git_http_XXXXXX", tmpdir) >= (int)sizeof(temp_template)) {
+					     "%.*s/git_http_XXXXXX", (int)tmpdir_len, tmpdir) >= (int)sizeof(temp_template)) {
 					git_error_set(GIT_ERROR_OS, "temporary directory path too long");
 					return -1;
 				}
@@ -574,6 +580,8 @@ static int http_stream_write(
 					return -1;
 				}
 
+				git_trace(GIT_TRACE_DEBUG, "HTTP: Created temporary file for POST buffering: %s", temp_template);
+
 				/* Save temp file path for cleanup */
 				if (git_str_sets(&stream->post_body_path, temp_template) < 0) {
 					p_close(stream->post_body_fd);
@@ -583,11 +591,9 @@ static int http_stream_write(
 
 				/* Write existing memory buffer to file */
 				if (stream->post_body_len > 0) {
-					written = p_write(stream->post_body_fd,
-						git_str_cstr(&stream->post_body),
-						stream->post_body_len);
-
-					if (written < 0 || (size_t)written != stream->post_body_len) {
+					if (p_write(stream->post_body_fd,
+						    git_str_cstr(&stream->post_body),
+						    stream->post_body_len) < 0) {
 						git_error_set(GIT_ERROR_OS, "failed to write to temporary file");
 						p_close(stream->post_body_fd);
 						p_unlink(git_str_cstr(&stream->post_body_path));
@@ -602,12 +608,9 @@ static int http_stream_write(
 			}
 
 			/* Write new data to temp file */
-			{
-				ssize_t written = p_write(stream->post_body_fd, buffer, len);
-				if (written < 0 || (size_t)written != len) {
-					git_error_set(GIT_ERROR_OS, "failed to write to temporary file");
-					return -1;
-				}
+			if (p_write(stream->post_body_fd, buffer, len) < 0) {
+				git_error_set(GIT_ERROR_OS, "failed to write to temporary file");
+				return -1;
 			}
 		} else {
 			/* Still under threshold, buffer in memory */
