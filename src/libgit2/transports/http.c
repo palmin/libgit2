@@ -551,8 +551,21 @@ static int http_stream_write(
 		if (stream->post_body_len + len > HTTP_BUFFER_THRESHOLD) {
 			/* Transition from memory to temp file if not already using one */
 			if (!stream->using_temp_file) {
-				char temp_template[] = "git_http_XXXXXX";
+				char temp_template[GIT_PATH_MAX];
+				const char *tmpdir;
 				ssize_t written;
+
+				/* Get temporary directory from TMPDIR environment variable */
+				tmpdir = getenv("TMPDIR");
+				if (!tmpdir || !tmpdir[0])
+					tmpdir = "/tmp";
+
+				/* Create temp file template with directory prefix */
+				if (snprintf(temp_template, sizeof(temp_template),
+					     "%s/git_http_XXXXXX", tmpdir) >= (int)sizeof(temp_template)) {
+					git_error_set(GIT_ERROR_OS, "temporary directory path too long");
+					return -1;
+				}
 
 				/* Create temp file */
 				stream->post_body_fd = mkstemp(temp_template);
