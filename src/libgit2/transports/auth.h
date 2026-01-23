@@ -14,7 +14,8 @@
 typedef enum {
 	GIT_HTTP_AUTH_BASIC = 1,
 	GIT_HTTP_AUTH_NEGOTIATE = 2,
-	GIT_HTTP_AUTH_NTLM = 4
+	GIT_HTTP_AUTH_NTLM = 4,
+	GIT_HTTP_AUTH_DIGEST = 8
 } git_http_auth_t;
 
 typedef struct git_http_auth_context git_http_auth_context;
@@ -40,6 +41,10 @@ struct git_http_auth_context {
 
 	/** Frees the authentication context */
 	void (*free)(git_http_auth_context *ctx);
+
+	/** Request info set by the caller before next_token (for Digest) */
+	const char *request_method;
+	git_net_url *request_url;
 };
 
 typedef struct {

@@ -15,6 +15,7 @@
 #include "auth.h"
 #include "auth_negotiate.h"
 #include "auth_ntlm.h"
+#include "auth_digest.h"
 #include "git2/sys/credential.h"
 #include "net.h"
 #include "stream.h"
@@ -26,6 +27,7 @@
 static git_http_auth_scheme auth_schemes[] = {
 	{ GIT_HTTP_AUTH_NEGOTIATE, "Negotiate", GIT_CREDENTIAL_DEFAULT, git_http_auth_negotiate },
 	{ GIT_HTTP_AUTH_NTLM, "NTLM", GIT_CREDENTIAL_USERPASS_PLAINTEXT, git_http_auth_ntlm },
+	{ GIT_HTTP_AUTH_DIGEST, "Digest", GIT_CREDENTIAL_USERPASS_PLAINTEXT, git_http_auth_digest },
 	{ GIT_HTTP_AUTH_BASIC, "Basic", GIT_CREDENTIAL_USERPASS_PLAINTEXT, git_http_auth_basic },
 };
 
@@ -549,7 +551,9 @@ static int apply_credentials(
 	git_str *buf,
 	git_http_server *server,
 	const char *header_name,
-	git_credential *credentials)
+	git_credential *credentials,
+	const char *method,
+	git_net_url *url)
 {
 	git_http_auth_context *auth = server->auth_context;
 	git_vector *challenges = &server->auth_challenges;
@@ -583,6 +587,10 @@ static int apply_credentials(
 	    (error = auth->set_challenge(auth, challenge)) < 0)
 		goto done;
 
+	/* provide request info for schemes that need it (Digest) */
+	auth->request_method = method;
+	auth->request_url = url;
+
 	if ((error = auth->next_token(&token, auth, credentials)) < 0)
 		goto done;
 
@@ -615,7 +623,9 @@ GIT_INLINE(int) apply_server_credentials(
 	return apply_credentials(buf,
 	                         &client->server,
 	                         "Authorization",
-	                         request->credentials);
+	                         request->credentials,
+	                         name_for_method(request->method),
+	                         request->url);
 }
 
 GIT_INLINE(int) apply_proxy_credentials(
@@ -626,7 +636,9 @@ GIT_INLINE(int) apply_proxy_credentials(
 	return apply_credentials(buf,
 	                         &client->proxy,
 	                         "Proxy-Authorization",
-	                         request->proxy_credentials);
+	                         request->proxy_credentials,
+	                         name_for_method(request->method),
+	                         request->url);
 }
 
 static int puts_host_and_port(git_str *buf, git_net_url *url, bool force_port)
