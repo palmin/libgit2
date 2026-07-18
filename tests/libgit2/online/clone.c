@@ -10,7 +10,7 @@
 #define LIVE_REPO_AS_DIR "http:/github.com/libgit2/TestGitRepository"
 #define LIVE_EMPTYREPO_URL "http://github.com/libgit2/TestEmptyRepository"
 #define BB_REPO_URL "https://libgit2-test@bitbucket.org/libgit2-test/testgitrepository.git"
-#define BB_REPO_URL_WITH_PASS "https://libgit2-test:YT77Ppm2nq8w4TYjGS8U@bitbucket.org/libgit2-test/testgitrepository.git"
+#define BB_REPO_URL_WITH_PASS "https://libgit2-test:ATATT3xFfGF0as31Ls7glHLXFnf-9PKaQwMsN6792h_uClrQtTe3K8D0NFq7zsmbgh470HRYTQu2XmdDjBbFFW2KqMwzW32wg6YQOTqoD4LY1TXL2OOeYC5MvG9NkGvDHbH3S2CgXS-iLBxFyay8cUkUxvoV_qB4ZXwtZZil5W2WR6AOCdNGZW0=7875E1FD@bitbucket.org/libgit2-test/testgitrepository.git"
 #define BB_REPO_URL_WITH_WRONG_PASS "https://libgit2-test:wrong@bitbucket.org/libgit2-test/testgitrepository.git"
 #define GOOGLESOURCE_REPO_URL "https://chromium.googlesource.com/external/github.com/sergi/go-diff"
 
@@ -36,6 +36,8 @@ static char *_remote_proxy_selfsigned = NULL;
 static char *_remote_expectcontinue = NULL;
 static char *_remote_redirect_initial = NULL;
 static char *_remote_redirect_subsequent = NULL;
+static char *_remote_redirect_authentication = NULL;
+static char *_remote_redirect_target = NULL;
 static char *_remote_speed_timesout = NULL;
 static char *_remote_speed_slow = NULL;
 
@@ -93,6 +95,8 @@ void test_online_clone__initialize(void)
 	_remote_expectcontinue = cl_getenv("GITTEST_REMOTE_EXPECTCONTINUE");
 	_remote_redirect_initial = cl_getenv("GITTEST_REMOTE_REDIRECT_INITIAL");
 	_remote_redirect_subsequent = cl_getenv("GITTEST_REMOTE_REDIRECT_SUBSEQUENT");
+	_remote_redirect_authentication = cl_getenv("GITTEST_REMOTE_REDIRECT_AUTHENTICATION");
+	_remote_redirect_target = cl_getenv("GITTEST_REMOTE_REDIRECT_TARGET");
 	_remote_speed_timesout = cl_getenv("GITTEST_REMOTE_SPEED_TIMESOUT");
 	_remote_speed_slow = cl_getenv("GITTEST_REMOTE_SPEED_SLOW");
 
@@ -105,13 +109,13 @@ void test_online_clone__initialize(void)
 	_orig_https_proxy = cl_getenv("HTTPS_PROXY");
 	_orig_no_proxy = cl_getenv("NO_PROXY");
 
-	_orig_ssh_cmd = cl_getenv("GIT_SSH");
+	_orig_ssh_cmd = cl_getenv("GIT_SSH_COMMAND");
 	_ssh_cmd = cl_getenv("GITTEST_SSH_CMD");
 
 	if (_ssh_cmd)
-		cl_setenv("GIT_SSH", _ssh_cmd);
+		cl_setenv("GIT_SSH_COMMAND", _ssh_cmd);
 	else
-		cl_setenv("GIT_SSH", NULL);
+		cl_setenv("GIT_SSH_COMMAND", NULL);
 
 	if (_remote_expectcontinue)
 		git_libgit2_opts(GIT_OPT_ENABLE_HTTP_EXPECT_CONTINUE, 1);
@@ -158,6 +162,8 @@ void test_online_clone__cleanup(void)
 	git__free(_remote_expectcontinue);
 	git__free(_remote_redirect_initial);
 	git__free(_remote_redirect_subsequent);
+	git__free(_remote_redirect_authentication);
+	git__free(_remote_redirect_target);
 	git__free(_remote_speed_timesout);
 	git__free(_remote_speed_slow);
 
@@ -174,7 +180,7 @@ void test_online_clone__cleanup(void)
 	git__free(_orig_https_proxy);
 	git__free(_orig_no_proxy);
 
-	cl_setenv("GIT_SSH", _orig_ssh_cmd);
+	cl_setenv("GIT_SSH_COMMAND", _orig_ssh_cmd);
 	git__free(_orig_ssh_cmd);
 
 	git__free(_ssh_cmd);
@@ -477,7 +483,7 @@ void test_online_clone__credentials(void)
 
 void test_online_clone__credentials_via_custom_headers(void)
 {
-	const char *creds = "libgit2-test:YT77Ppm2nq8w4TYjGS8U";
+	const char *creds = "libgit2-test:ATATT3xFfGF0as31Ls7glHLXFnf-9PKaQwMsN6792h_uClrQtTe3K8D0NFq7zsmbgh470HRYTQu2XmdDjBbFFW2KqMwzW32wg6YQOTqoD4LY1TXL2OOeYC5MvG9NkGvDHbH3S2CgXS-iLBxFyay8cUkUxvoV_qB4ZXwtZZil5W2WR6AOCdNGZW0=7875E1FD";
 	git_str auth = GIT_STR_INIT;
 
 	cl_git_pass(git_str_puts(&auth, "Authorization: Basic "));
@@ -493,7 +499,7 @@ void test_online_clone__credentials_via_custom_headers(void)
 void test_online_clone__bitbucket_style(void)
 {
 	git_credential_userpass_payload user_pass = {
-		"libgit2-test", "YT77Ppm2nq8w4TYjGS8U"
+		"libgit2-test", "ATATT3xFfGF0as31Ls7glHLXFnf-9PKaQwMsN6792h_uClrQtTe3K8D0NFq7zsmbgh470HRYTQu2XmdDjBbFFW2KqMwzW32wg6YQOTqoD4LY1TXL2OOeYC5MvG9NkGvDHbH3S2CgXS-iLBxFyay8cUkUxvoV_qB4ZXwtZZil5W2WR6AOCdNGZW0=7875E1FD"
 	};
 
 	g_options.fetch_opts.callbacks.credentials = git_credential_userpass;
@@ -1436,5 +1442,43 @@ void test_online_clone__timeout_configurable_succeeds_slowly(void)
 	cl_git_pass(git_libgit2_opts(GIT_OPT_SET_SERVER_TIMEOUT, 1000));
 
 	cl_git_pass(git_clone(&g_repo, _remote_speed_slow, "./slow-but-successful", NULL));
+#endif
+}
+
+#ifndef GIT_WINHTTP
+static int ensure_correct_host(
+	git_credential **cred,
+	const char *url,
+	const char *user,
+	unsigned int allowed_types,
+	void *data)
+{
+	char **given_url = (char **)data;
+
+	GIT_UNUSED(cred);
+	GIT_UNUSED(user);
+	GIT_UNUSED(allowed_types);
+
+	*given_url = git__strdup(url);
+	return given_url ? GIT_PASSTHROUGH : -1;
+}
+#endif
+
+void test_online_clone__redirect_authentication_is_current_host(void)
+{
+#ifndef GIT_WINHTTP
+	char *given_url;
+
+	if (!_remote_redirect_authentication || !_remote_redirect_target)
+		cl_skip();
+
+	g_options.fetch_opts.callbacks.credentials = ensure_correct_host;
+	g_options.fetch_opts.callbacks.payload = &given_url;
+
+	cl_git_fail_with(GIT_EAUTH, git_clone(&g_repo, _remote_redirect_authentication, "./redirect_authentication", &g_options));
+
+	cl_assert_equal_s(_remote_redirect_target, given_url);
+
+	git__free(given_url);
 #endif
 }

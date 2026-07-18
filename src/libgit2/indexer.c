@@ -24,9 +24,10 @@
 #include "object.h"
 #include "hashmap_oid.h"
 
-size_t git_indexer__max_objects = UINT32_MAX;
-
 #define UINT31_MAX (0x7FFFFFFF)
+
+size_t git_indexer__max_objects = UINT32_MAX;
+size_t git_indexer__max_object_size = UINT31_MAX;
 
 GIT_HASHMAP_OID_SETUP(git_indexer_oidmap, git_oid *);
 
@@ -921,12 +922,12 @@ int git_indexer_append(git_indexer *idx, const void *data, size_t size, git_inde
 		if (git_vector_init(&idx->deltas, total_objects / 2, NULL) < 0)
 			return -1;
 
+		stats->total_objects = total_objects;
+		stats->indexed_objects = 0;
 		stats->received_objects = 0;
 		stats->local_objects = 0;
 		stats->total_deltas = 0;
 		stats->indexed_deltas = 0;
-		stats->indexed_objects = 0;
-		stats->total_objects = total_objects;
 
 		if ((error = do_progress_callback(idx, stats)) != 0)
 			return error;

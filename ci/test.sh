@@ -198,7 +198,7 @@ if should_run "PROXY_TESTS"; then
 fi
 
 if should_run "NTLM_TESTS" || should_run "ONLINE_TESTS"; then
-	curl --location --silent --show-error https://github.com/ethomson/poxygit/releases/download/v0.6.0/poxygit-0.6.0.jar >poxygit.jar
+	curl --location --silent --show-error https://github.com/ethomson/poxygit/releases/download/v0.8.1/poxygit-0.8.1.jar >poxygit.jar
 
 	echo "Starting HTTP server..."
 	HTTP_DIR=`mktemp -d ${TMPDIR}/http.XXXXXXXX`
@@ -216,18 +216,13 @@ if should_run "SSH_TESTS"; then
 	cat >"${SSHD_DIR}/sshd_config" <<-EOF
 	Port 2222
 	ListenAddress 0.0.0.0
-	Protocol 2
 	HostKey ${SSHD_DIR}/id_${GITTEST_SSH_KEYTYPE}
 	PidFile ${SSHD_DIR}/pid
 	AuthorizedKeysFile ${HOME}/.ssh/authorized_keys
 	LogLevel DEBUG
-	RSAAuthentication yes
 	PasswordAuthentication yes
 	PubkeyAuthentication yes
-	ChallengeResponseAuthentication no
 	StrictModes no
-	HostCertificate ${SSHD_DIR}/id_${GITTEST_SSH_KEYTYPE}.pub
-	HostKey ${SSHD_DIR}/id_${GITTEST_SSH_KEYTYPE}
 	# Required here as sshd will simply close connection otherwise
 	UsePAM no
 	EOF
@@ -304,13 +299,17 @@ if should_run "ONLINE_TESTS"; then
 	echo "## Running networking (online) tests"
 	echo "##############################################################################"
 
-	export GITTEST_REMOTE_REDIRECT_INITIAL="http://localhost:9000/initial-redirect/libgit2/TestGitRepository"
+	export GITTEST_REMOTE_REDIRECT_INITIAL="http://localhost:9000/initial-redirect:none/libgit2/TestGitRepository"
 	export GITTEST_REMOTE_REDIRECT_SUBSEQUENT="http://localhost:9000/subsequent-redirect/libgit2/TestGitRepository"
-	export GITTEST_REMOTE_SPEED_SLOW="http://localhost:9000/speed-9600/test.git"
-	export GITTEST_REMOTE_SPEED_TIMESOUT="http://localhost:9000/speed-0.5/test.git"
+	export GITTEST_REMOTE_REDIRECT_AUTHENTICATION="http://localhost:9000/initial-redirect/libgit2/private-repository"
+	export GITTEST_REMOTE_REDIRECT_TARGET="https://github.com/libgit2/private-repository"
+	export GITTEST_REMOTE_SPEED_SLOW="http://localhost:9000/speed:9600/test.git"
+	export GITTEST_REMOTE_SPEED_TIMESOUT="http://localhost:9000/speed:0.5/test.git"
 	run_test online
 	unset GITTEST_REMOTE_REDIRECT_INITIAL
 	unset GITTEST_REMOTE_REDIRECT_SUBSEQUENT
+	unset GITTEST_REMOTE_REDIRECT_AUTHENTICATION
+	unset GITTEST_REMOTE_REDIRECT_TARGET
 	unset GITTEST_REMOTE_SPEED_SLOW
 	unset GITTEST_REMOTE_SPEED_TIMESOUT
 

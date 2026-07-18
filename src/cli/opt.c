@@ -19,7 +19,7 @@
 #include <limits.h>
 #include <assert.h>
 
-#if defined(__sun) || defined(__illumos__)
+#if defined(__sun) || defined(__illumos__) || defined(__CYGWIN__)
 # include <alloca.h>
 #endif
 
@@ -50,7 +50,7 @@ GIT_INLINE(const cli_opt_spec *) spec_for_long(
 	const char *arg)
 {
 	const cli_opt_spec *spec;
-	char *eql;
+	const char *eql;
 	size_t eql_pos;
 
 	eql = strchr(arg, '=');
@@ -359,7 +359,7 @@ GIT_INLINE(const cli_opt_spec *) spec_for_sort(
 	const char *arg)
 {
 	int is_negated, has_value = 0;
-	const char *value;
+	const char *value = NULL;
 	const cli_opt_spec *spec = NULL;
 	size_t idx = 0;
 

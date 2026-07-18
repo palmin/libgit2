@@ -249,9 +249,9 @@ GIT_EXTERN(const char *) git_remote_name(const git_remote *remote);
 /**
  * Get the remote's url
  *
- * If url.*.insteadOf has been configured for this URL, it will
- * return the modified URL.  If `git_remote_set_instance_pushurl`
- * has been called for this remote, then that URL will be returned.
+ * If url.*.insteadOf has been configured for this URL, it will return
+ * the modified URL. This function does not consider if a push url has
+ * been configured for this remote (use `git_remote_pushurl` if needed).
  *
  * @param remote the remote
  * @return a pointer to the url
@@ -416,6 +416,19 @@ GIT_EXTERN(int) git_remote_ls(const git_remote_head ***out,  size_t *size, git_r
  * @return 1 if it's connected, 0 otherwise.
  */
 GIT_EXTERN(int) git_remote_connected(const git_remote *remote);
+
+/**
+ * Get the remote repository's object format.
+ *
+ * The remote (or more exactly its transport) must have connected to
+ * the remote repository. This format is available as soon as the
+ * connection to the remote is initiated and stays connected.
+ *
+ * @param out the resulting object format type
+ * @param remote the remote
+ * @return 0 on success, or an error code
+ */
+GIT_EXTERN(int) git_remote_oid_type(git_oid_t *out, git_remote *remote);
 
 /**
  * Cancel the operation
@@ -596,9 +609,8 @@ struct git_remote_callbacks {
 	git_credential_acquire_cb credentials;
 
 	/**
-	 * If cert verification fails, this will be called to let the
-	 * user make the final decision of whether to allow the
-	 * connection to proceed. Returns 0 to allow the connection
+	 * This will be called to let the user make the final decision of whether
+	 * to allow the connection to proceed. Returns 0 to allow the connection
 	 * or a negative value to indicate an error.
 	 */
 	git_transport_certificate_check_cb certificate_check;
@@ -751,7 +763,7 @@ typedef enum {
 	 */
 	GIT_REMOTE_DOWNLOAD_TAGS_NONE,
 	/**
-	 * Ask for the all the tags.
+	 * Ask for all the tags.
 	 */
 	GIT_REMOTE_DOWNLOAD_TAGS_ALL
 } git_remote_autotag_option_t;

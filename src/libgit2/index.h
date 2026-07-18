@@ -154,6 +154,9 @@ extern int git_index__open(
 	const char *index_path,
 	git_oid_t oid_type);
 
+/* If the path is conflicted, move it from the index to reuc. */
+int git_index__conflict_to_reuc(git_index *index, const char *path);
+
 /* Copy the current entries vector *and* increment the index refcount.
  * Call `git_index__release_snapshot` when done.
  */

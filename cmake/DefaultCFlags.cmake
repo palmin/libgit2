@@ -13,6 +13,9 @@ if(MSVC)
 	# /Gd - explicitly set cdecl calling convention
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /Gd")
 
+	# Remove warnings about operands that use different enum types.
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /wd5287")
+
 	if(NOT (MSVC_VERSION LESS 1900))
 		# /guard:cf - Enable Control Flow Guard
 		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /guard:cf")
@@ -56,7 +59,7 @@ if(MSVC)
 	set(CMAKE_C_FLAGS_MINSIZEREL "/DNDEBUG /O1 /Oy /GL /Gy ${CRT_FLAG_RELEASE}")
 
 	# /IGNORE:4221 - Ignore empty compilation units
-	set(CMAKE_STATIC_LINKER_FLAGS "/IGNORE:4221")
+	set(CMAKE_STATIC_LINKER_FLAGS "${CMAKE_STATIC_LINKER_FLAGS} /IGNORE:4221")
 
 	# /DYNAMICBASE - Address space load randomization (ASLR)
 	# /NXCOMPAT - Data execution prevention (DEP)
