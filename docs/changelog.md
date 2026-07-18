@@ -1,3 +1,15 @@
+v1.9.6
+------
+
+This release includes a few small but important bugfixes.
+
+* load_known_hosts: do not fail if homedir is invalid
+  by @JonasVautherin in https://github.com/libgit2/libgit2/pull/7056
+* Fix segfault on Android when no HOME set by @501st-alpha1 in
+  https://github.com/libgit2/libgit2/pull/7309
+* cmake: bring back hidden visibility for the static build by
+  @carlosmn in https://github.com/libgit2/libgit2/pull/7288
+
 v1.9.5
 ------
 
