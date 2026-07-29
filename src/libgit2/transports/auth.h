@@ -14,7 +14,8 @@
 typedef enum {
 	GIT_HTTP_AUTH_BASIC = 1,
 	GIT_HTTP_AUTH_NEGOTIATE = 2,
-	GIT_HTTP_AUTH_NTLM = 4
+	GIT_HTTP_AUTH_NTLM = 4,
+	GIT_HTTP_AUTH_DIGEST = 8
 } git_http_auth_t;
 
 typedef struct git_http_auth_context git_http_auth_context;
@@ -40,6 +41,16 @@ struct git_http_auth_context {
 
 	/** Frees the authentication context */
 	void (*free)(git_http_auth_context *ctx);
+
+	/**
+	 * Sets the current request's method and target. Digest hashes
+	 * `method:uri`, so unlike Basic/NTLM it must know them before
+	 * producing a token; other schemes leave this NULL.
+	 */
+	int (*set_request)(
+		git_http_auth_context *ctx,
+		const char *method,
+		const char *target);
 };
 
 typedef struct {
@@ -63,6 +74,10 @@ int git_http_auth_dummy(
 	const git_net_url *url);
 
 int git_http_auth_basic(
+	git_http_auth_context **out,
+	const git_net_url *url);
+
+int git_http_auth_digest(
 	git_http_auth_context **out,
 	const git_net_url *url);
 

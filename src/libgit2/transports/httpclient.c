@@ -27,6 +27,13 @@ static git_http_auth_scheme auth_schemes[] = {
 	{ GIT_HTTP_AUTH_NEGOTIATE, "Negotiate", GIT_CREDENTIAL_DEFAULT, git_http_auth_negotiate },
 	{ GIT_HTTP_AUTH_NTLM, "NTLM", GIT_CREDENTIAL_USERPASS_PLAINTEXT, git_http_auth_ntlm },
 	{ GIT_HTTP_AUTH_BASIC, "Basic", GIT_CREDENTIAL_USERPASS_PLAINTEXT, git_http_auth_basic },
+	/*
+	 * Digest is listed AFTER Basic on purpose: best_scheme_and_challenge
+	 * walks this table in order and takes the first scheme the server also
+	 * offered, so any server advertising Basic keeps using Basic (no change
+	 * for existing servers) and Digest engages only where Basic is absent.
+	 */
+	{ GIT_HTTP_AUTH_DIGEST, "Digest", GIT_CREDENTIAL_USERPASS_PLAINTEXT, git_http_auth_digest },
 };
 
 /*
@@ -549,6 +556,8 @@ static int apply_credentials(
 	git_str *buf,
 	git_http_server *server,
 	const char *header_name,
+	const char *method,
+	const char *target,
 	git_credential *credentials)
 {
 	git_http_auth_context *auth = server->auth_context;
@@ -583,6 +592,11 @@ static int apply_credentials(
 	    (error = auth->set_challenge(auth, challenge)) < 0)
 		goto done;
 
+	/* Digest hashes method:uri, so hand it the request before the token */
+	if (auth->set_request && method && target &&
+	    (error = auth->set_request(auth, method, target)) < 0)
+		goto done;
+
 	if ((error = auth->next_token(&token, auth, credentials)) < 0)
 		goto done;
 
@@ -612,10 +626,29 @@ GIT_INLINE(int) apply_server_credentials(
 	git_http_client *client,
 	git_http_request *request)
 {
-	return apply_credentials(buf,
-	                         &client->server,
-	                         "Authorization",
-	                         request->credentials);
+	git_str target = GIT_STR_INIT;
+	int error;
+
+	/* the request-target exactly as generate_request writes the status line */
+	if (request->proxy && strcmp(request->url->scheme, "https"))
+		error = git_net_url_fmt(&target, request->url);
+	else
+		error = git_net_url_fmt_path(&target, request->url);
+
+	if (error < 0 || git_str_oom(&target)) {
+		git_str_dispose(&target);
+		return -1;
+	}
+
+	error = apply_credentials(buf,
+	                          &client->server,
+	                          "Authorization",
+	                          name_for_method(request->method),
+	                          git_str_cstr(&target),
+	                          request->credentials);
+
+	git_str_dispose(&target);
+	return error;
 }
 
 GIT_INLINE(int) apply_proxy_credentials(
@@ -623,9 +656,17 @@ GIT_INLINE(int) apply_proxy_credentials(
 	git_http_client *client,
 	git_http_request *request)
 {
+	/*
+	 * NULL method/target: Digest is not supported as a proxy scheme (the
+	 * CONNECT vs normal-request target is ambiguous here), so its
+	 * set_request is skipped and it fails cleanly rather than signing the
+	 * wrong URI. Basic/NTLM/Negotiate ignore these params.
+	 */
 	return apply_credentials(buf,
 	                         &client->proxy,
 	                         "Proxy-Authorization",
+	                         NULL,
+	                         NULL,
 	                         request->proxy_credentials);
 }
 
