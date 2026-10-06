@@ -495,6 +495,38 @@ int git_packfile_unpack_header(
 	return 0;
 }
 
+int git_packfile__entry_header(
+		git_object_t *type_out,
+		size_t *size_out,
+		off64_t *data_offset_out,
+		off64_t *base_offset_out,
+		struct git_pack_file *p,
+		off64_t offset)
+{
+	git_mwindow *w_curs = NULL;
+	off64_t curpos = offset, base_offset = 0;
+	size_t size;
+	git_object_t type;
+	int error;
+
+	if ((error = git_packfile_unpack_header(&size, &type, p, &w_curs, &curpos)) < 0)
+		return error;
+
+	if (type == GIT_OBJECT_OFS_DELTA || type == GIT_OBJECT_REF_DELTA) {
+		error = get_delta_base(&base_offset, p, &w_curs, &curpos, type, offset);
+		git_mwindow_close(&w_curs);
+
+		if (error < 0)
+			return error;
+	}
+
+	*type_out = type;
+	*size_out = size;
+	*data_offset_out = curpos;
+	*base_offset_out = base_offset;
+	return 0;
+}
+
 int git_packfile_resolve_header(
 		size_t *size_p,
 		git_object_t *type_p,

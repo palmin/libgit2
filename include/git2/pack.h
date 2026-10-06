@@ -78,6 +78,19 @@ GIT_EXTERN(int) git_packbuilder_new(git_packbuilder **out, git_repository *repo)
 GIT_EXTERN(unsigned int) git_packbuilder_set_threads(git_packbuilder *pb, unsigned int n);
 
 /**
+ * Set whether deltas stored in existing packs are reused
+ *
+ * By default an object stored in a pack as a delta against a base that
+ * is packed too keeps that delta, which saves searching for a new one.
+ * Turning this off computes every delta, like `git pack-objects
+ * --no-reuse-delta`.
+ *
+ * @param pb The packbuilder
+ * @param enabled Whether to reuse deltas
+ */
+GIT_EXTERN(void) git_packbuilder_set_reuse_delta(git_packbuilder *pb, int enabled);
+
+/**
  * Insert a single object
  *
  * For an optimal pack it's mandatory to insert objects in recency order,

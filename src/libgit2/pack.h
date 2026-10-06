@@ -175,6 +175,21 @@ int git_packfile_resolve_header(
 		struct git_pack_file *p,
 		off64_t offset);
 
+/*
+ * Read how the object at offset is stored: its type and size as stored,
+ * which for a delta are the delta type and the size of the delta, where
+ * its compressed data starts and, for a delta, the offset of its base,
+ * which must be in the same pack. base_offset_out is 0 for an object
+ * that is not a delta.
+ */
+int git_packfile__entry_header(
+		git_object_t *type_out,
+		size_t *size_out,
+		off64_t *data_offset_out,
+		off64_t *base_offset_out,
+		struct git_pack_file *p,
+		off64_t offset);
+
 int git_packfile_unpack(git_rawobj *obj, struct git_pack_file *p, off64_t *obj_offset);
 
 int git_packfile_stream_open(git_packfile_stream *obj, struct git_pack_file *p, off64_t curpos);

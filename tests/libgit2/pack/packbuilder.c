@@ -1,6 +1,8 @@
 #include "clar_libgit2.h"
 #include "futils.h"
 #include "pack.h"
+#include "pack-objects.h"
+#include "odb.h"
 #include "hash.h"
 #include "iterator.h"
 #include "vector.h"
@@ -140,6 +142,92 @@ static void get_index_path(git_str *out, git_packbuilder *pb)
 	git_str_puts(out, "pack-");
 	git_str_puts(out, git_packbuilder_name(pb));
 	git_str_puts(out, ".idx");
+}
+
+/*
+ * Write the seeded objects to a pack and read every one back from that pack
+ * alone, checking each hashes to its id, which a reused delta not rebuilding
+ * its object would fail.
+ */
+static void write_and_verify_pack(void)
+{
+	git_odb *odb;
+	git_odb_backend *backend;
+	git_str idx = GIT_STR_INIT;
+	size_t i;
+
+	cl_git_pass(git_packbuilder_write(_packbuilder, ".", 0, NULL, NULL));
+	get_index_path(&idx, _packbuilder);
+
+	cl_git_pass(git_odb__new(&odb, NULL));
+#ifdef GIT_EXPERIMENTAL_SHA256
+	cl_git_pass(git_odb_backend_one_pack(&backend, idx.ptr, NULL));
+#else
+	cl_git_pass(git_odb_backend_one_pack(&backend, idx.ptr));
+#endif
+	cl_git_pass(git_odb_add_backend(odb, backend, 1));
+
+	for (i = 0; i < _packbuilder->nr_objects; i++) {
+		git_pobject *po = _packbuilder->object_list + i;
+		git_odb_object *obj;
+		git_oid hashed;
+
+		cl_git_pass(git_odb_read(&obj, odb, &po->id));
+		cl_git_pass(git_odb__hash(&hashed, git_odb_object_data(obj),
+			git_odb_object_size(obj), git_odb_object_type(obj), GIT_OID_SHA1));
+		cl_assert_equal_oid(&po->id, &hashed);
+		git_odb_object_free(obj);
+	}
+
+	git_odb_free(odb);
+	git_str_dispose(&idx);
+}
+
+static int insert_object(const git_oid *id, void *payload)
+{
+	GIT_UNUSED(payload);
+	return git_packbuilder_insert(_packbuilder, id, NULL);
+}
+
+/*
+ * Every object in the largest pack of testrepo.git, where most are stored as
+ * deltas. The history of HEAD is all loose objects, and some loose objects
+ * are malformed on purpose for other tests.
+ */
+static void seed_every_object(void)
+{
+	git_odb *odb;
+	git_odb_backend *backend;
+
+	cl_git_pass(git_odb__new(&odb, NULL));
+#ifdef GIT_EXPERIMENTAL_SHA256
+	cl_git_pass(git_odb_backend_one_pack(&backend,
+		"objects/pack/pack-a81e489679b7d3418f9ab594bda8ceb37dd4c695.idx", NULL));
+#else
+	cl_git_pass(git_odb_backend_one_pack(&backend,
+		"objects/pack/pack-a81e489679b7d3418f9ab594bda8ceb37dd4c695.idx"));
+#endif
+	cl_git_pass(git_odb_add_backend(odb, backend, 1));
+	cl_git_pass(git_odb_foreach(odb, insert_object, NULL));
+	git_odb_free(odb);
+}
+
+void test_pack_packbuilder__reuses_deltas(void)
+{
+	seed_every_object();
+	write_and_verify_pack();
+
+	/* the packs of testrepo.git store some of these objects as deltas */
+	cl_assert(git_packbuilder__reused_count(_packbuilder) > 0);
+}
+
+void test_pack_packbuilder__can_compute_every_delta(void)
+{
+	git_packbuilder_set_reuse_delta(_packbuilder, 0);
+	seed_every_object();
+	write_and_verify_pack();
+
+	cl_assert_equal_i(0, git_packbuilder__reused_count(_packbuilder));
 }
 
 void test_pack_packbuilder__write_default_path(void)

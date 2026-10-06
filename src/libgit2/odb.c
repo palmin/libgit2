@@ -17,6 +17,7 @@
 #include "repository.h"
 #include "blob.h"
 #include "oid.h"
+#include "pack.h"
 
 #include "git2/odb_backend.h"
 #include "git2/oid.h"
@@ -975,6 +976,33 @@ int git_odb__get_commit_graph_file(git_commit_graph_file **out, git_odb *db)
 
 done:
 	git_mutex_unlock(&db->lock);
+	return error;
+}
+
+int git_odb__find_pack_entry(struct git_pack_entry *out, git_odb *db, const git_oid *id)
+{
+	size_t i;
+	int error;
+
+	if ((error = git_mutex_lock(&db->lock)) < 0) {
+		git_error_set(GIT_ERROR_ODB, "failed to acquire the odb lock");
+		return error;
+	}
+
+	error = GIT_ENOTFOUND;
+	for (i = 0; i < db->backends.length && error == GIT_ENOTFOUND; ++i) {
+		backend_internal *internal = git_vector_get(&db->backends, i);
+		error = git_odb__pack_backend_entry_find(out, internal->backend, id);
+	}
+
+	/* referenced while the backend holding the pack cannot let go of it */
+	if (error == 0)
+		git_atomic32_inc(&out->p->refcount);
+
+	git_mutex_unlock(&db->lock);
+
+	if (error == GIT_ENOTFOUND)
+		git_error_clear();
 	return error;
 }
 

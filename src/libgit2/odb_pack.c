@@ -953,6 +953,18 @@ int git_odb_backend_one_pack(
 	return 0;
 }
 
+int git_odb__pack_backend_entry_find(
+	struct git_pack_entry *e,
+	git_odb_backend *backend,
+	const git_oid *oid)
+{
+	/* only a pack backend knows where in its packs an object is */
+	if (backend->read != &pack_backend__read)
+		return GIT_ENOTFOUND;
+
+	return pack_entry_find(e, (struct pack_backend *)backend, oid);
+}
+
 #ifdef GIT_EXPERIMENTAL_SHA256
 int git_odb_backend_pack(
 	git_odb_backend **backend_out,

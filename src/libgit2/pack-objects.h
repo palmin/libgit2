@@ -16,6 +16,7 @@
 #include "pool.h"
 #include "indexer.h"
 #include "hashmap_oid.h"
+#include "vector.h"
 
 #include "git2/oid.h"
 #include "git2/pack.h"
@@ -44,6 +45,10 @@ typedef struct git_pobject {
 	void *delta_data;
 	size_t delta_size;
 	size_t z_delta_size;
+
+	/* where the delta reused from an existing pack is stored, or NULL */
+	struct git_pack_file *reuse_pack;
+	off64_t reuse_offset;
 
 	unsigned int written:1,
 	             recursing:1,
@@ -97,6 +102,10 @@ struct git_packbuilder {
 
 	unsigned int nr_threads; /* nr of threads to use */
 
+	bool no_reuse_delta; /* compute every delta instead of reusing them */
+	git_vector reuse_packs; /* packs deltas are reused from, referenced */
+	uint32_t nr_reused; /* objects whose delta is reused */
+
 	git_packbuilder_progress progress_cb;
 	void *progress_cb_payload;
 
@@ -111,6 +120,9 @@ struct git_packbuilder {
 };
 
 int git_packbuilder__write_buf(git_str *buf, git_packbuilder *pb);
+
+/* the number of objects whose delta was reused from an existing pack */
+uint32_t git_packbuilder__reused_count(git_packbuilder *pb);
 int git_packbuilder__prepare(git_packbuilder *pb);
 
 

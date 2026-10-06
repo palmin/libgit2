@@ -152,6 +152,22 @@ int git_odb__read_header_or_object(
  */
 int git_odb__get_commit_graph_file(git_commit_graph_file **out, git_odb *odb);
 
+struct git_pack_entry;
+
+/*
+ * Find where in a pack the object is stored, asking the pack backends
+ * in priority order. Returns GIT_ENOTFOUND when no pack has it. The pack
+ * in the entry has been given a reference, so it stays around after the
+ * backend lets go of it, and must be released with git_mwindow_put_pack.
+ */
+int git_odb__find_pack_entry(struct git_pack_entry *out, git_odb *db, const git_oid *id);
+
+/* the same for a single backend, GIT_ENOTFOUND for one that is not a pack backend */
+int git_odb__pack_backend_entry_find(
+	struct git_pack_entry *e,
+	git_odb_backend *backend,
+	const git_oid *oid);
+
 /* freshen an entry in the object database */
 int git_odb__freshen(git_odb *db, const git_oid *id);
 

@@ -151,6 +151,7 @@ int git_packbuilder_new(git_packbuilder **out, git_repository *repo)
 	if (git_hash_ctx_init(&pb->ctx, hash_algorithm) < 0 ||
 		git_zstream_init(&pb->zstream, GIT_ZSTREAM_DEFLATE) < 0 ||
 		git_repository_odb(&pb->odb, repo) < 0 ||
+		git_vector_init(&pb->reuse_packs, 0, NULL) < 0 ||
 		packbuilder_config(pb) < 0)
 		goto on_error;
 
@@ -311,6 +312,66 @@ on_error:
 	return -1;
 }
 
+/*
+ * Read a delta reused from an existing pack. It is read to the end of its
+ * compressed stream, so zlib checks it, and it must turn an object the size
+ * of its base into one the size of the object, as a delta that does not would
+ * be packed under the wrong object.
+ */
+static int read_reused_delta(void **out, git_pobject *po)
+{
+	git_packfile_stream stream;
+	unsigned char *buf;
+	size_t len = 0, base_size, result_size;
+	off64_t position;
+	ssize_t n;
+	int error;
+
+	*out = NULL;
+
+	/* room for one byte more, to see the stream end where the delta does */
+	buf = git__malloc(po->delta_size + 1);
+	GIT_ERROR_CHECK_ALLOC(buf);
+
+	if ((error = git_packfile_stream_open(&stream, po->reuse_pack, po->reuse_offset)) < 0) {
+		git__free(buf);
+		return error;
+	}
+
+	while (!stream.done && len <= po->delta_size) {
+		position = stream.curpos;
+		n = git_packfile_stream_read(&stream, buf + len, po->delta_size + 1 - len);
+
+		/* the stream continues in the next window */
+		if (n == GIT_EBUFS && stream.curpos != position)
+			continue;
+		if (n < 0) {
+			error = -1;
+			break;
+		}
+
+		len += n;
+	}
+
+	git_packfile_stream_dispose(&stream);
+
+	if (!error && (!stream.done || len != po->delta_size ||
+	    git_delta_read_header(&base_size, &result_size, buf, len) < 0 ||
+	    base_size != po->delta->size || result_size != po->size)) {
+		git_error_set(GIT_ERROR_INVALID, "reused delta for %s does not match its object",
+			git_oid_tostr_s(&po->id));
+		error = -1;
+	}
+
+	if (error < 0) {
+		git__free(buf);
+		return error;
+	}
+
+	*out = buf;
+	return 0;
+}
+
 static int write_object(
 	git_packbuilder *pb,
 	git_pobject *po,
@@ -334,7 +395,10 @@ static int write_object(
 	if (po->delta) {
 		if (po->delta_data)
 			data = po->delta_data;
-		else if ((error = get_delta(&data, pb->odb, po)) < 0)
+		else if (po->reuse_pack) {
+			if ((error = read_reused_delta(&data, po)) < 0)
+				goto done;
+		} else if ((error = get_delta(&data, pb->odb, po)) < 0)
 				goto done;
 
 		data_len = po->delta_size;
@@ -1333,6 +1397,237 @@ static int ll_find_deltas(git_packbuilder *pb, git_pobject **list,
 #define ll_find_deltas(pb, l, ls, w, d) find_deltas(pb, l, &ls, w, d)
 #endif
 
+/*
+ * Delta reuse, as git pack-objects does it. An object stored in an existing
+ * pack as a delta against a base that is also being packed keeps that delta,
+ * read back when the object is written, instead of having one searched for.
+ * Besides saving the search, this keeps deltas found when the pack was written
+ * with what was known then, such as the path of each object, which inserting
+ * objects by id alone would not give the search.
+ */
+
+struct reuse_location {
+	struct git_pack_file *p;
+	off64_t offset;
+	git_pobject *po;
+};
+
+static int reuse_location_cmp(const void *a, const void *b)
+{
+	const struct reuse_location *x = a, *y = b;
+
+	if (x->p != y->p)
+		return (uintptr_t)x->p < (uintptr_t)y->p ? -1 : 1;
+	return x->offset < y->offset ? -1 : x->offset > y->offset;
+}
+
+static git_pobject *reused_base_at(
+	struct reuse_location *locations, size_t count,
+	struct git_pack_file *p, off64_t offset)
+{
+	struct reuse_location key = { p, offset, NULL }, *found;
+
+	found = bsearch(&key, locations, count, sizeof(*locations), reuse_location_cmp);
+	return found ? found->po : NULL;
+}
+
+/* keeps the pack referenced while its deltas may be read, once per pack */
+static int hold_reuse_pack(git_packbuilder *pb, struct git_pack_file *p)
+{
+	struct git_pack_file *held;
+	size_t i;
+
+	git_vector_foreach(&pb->reuse_packs, i, held) {
+		if (held == p) {
+			git_mwindow_put_pack(p);
+			return 0;
+		}
+	}
+
+	return git_vector_insert(&pb->reuse_packs, p);
+}
+
+static void drop_reused_delta(git_pobject *po)
+{
+	po->delta = NULL;
+	po->delta_size = 0;
+	po->reuse_pack = NULL;
+	po->reuse_offset = 0;
+}
+
+/*
+ * Reused deltas come from packs written with their own depth limit, and an
+ * object stored in two packs can be a delta against its own delta there, so
+ * chains can be longer than ours or go round in a circle. Such a delta is
+ * dropped, leaving its object to have a delta searched for like any other.
+ */
+static int break_reused_chains(git_packbuilder *pb, size_t max_depth)
+{
+	enum { UNVISITED = 0, VISITING, DONE };
+	unsigned char *state;
+	size_t *depth;
+	git_pobject **chain;
+	size_t i;
+	int error = 0;
+
+	state = git__calloc(pb->nr_objects, sizeof(*state));
+	depth = git__calloc(pb->nr_objects, sizeof(*depth));
+	chain = git__calloc(pb->nr_objects, sizeof(*chain));
+	if (!state || !depth || !chain) {
+		git_error_set_oom();
+		error = -1;
+		goto done;
+	}
+
+	for (i = 0; i < pb->nr_objects; i++) {
+		git_pobject *po = pb->object_list + i;
+		size_t n = 0, d;
+
+		/* follow the chain of bases until one whose depth is known */
+		while (po && state[po - pb->object_list] == UNVISITED) {
+			state[po - pb->object_list] = VISITING;
+			chain[n++] = po;
+			po = po->delta;
+		}
+
+		if (!n)
+			continue;
+
+		/* the last object in the chain is where it ends, meets a known depth or circles */
+		if (!po) {
+			d = 0;
+		} else if (state[po - pb->object_list] == DONE) {
+			d = depth[po - pb->object_list] + 1;
+		} else {
+			drop_reused_delta(chain[n - 1]);
+			d = 0;
+		}
+
+		while (n--) {
+			git_pobject *link = chain[n];
+
+			if (d > max_depth) {
+				drop_reused_delta(link);
+				d = 0;
+			}
+
+			depth[link - pb->object_list] = d;
+			state[link - pb->object_list] = DONE;
+			d++;
+		}
+	}
+
+done:
+	git__free(state);
+	git__free(depth);
+	git__free(chain);
+	return error;
+}
+
+static int reuse_deltas(git_packbuilder *pb)
+{
+	struct reuse_location *locations;
+	size_t i, count = 0;
+	int error = 0;
+
+	locations = git__calloc(pb->nr_objects, sizeof(*locations));
+	GIT_ERROR_CHECK_ALLOC(locations);
+
+	/* where each object is stored, if in a pack */
+	for (i = 0; i < pb->nr_objects; i++) {
+		git_pobject *po = pb->object_list + i;
+		struct git_pack_entry entry;
+
+		if (po->delta)
+			continue;
+
+		if ((error = git_odb__find_pack_entry(&entry, pb->odb, &po->id)) < 0) {
+			if (error != GIT_ENOTFOUND)
+				goto done;
+			error = 0;
+			continue;
+		}
+
+		if ((error = hold_reuse_pack(pb, entry.p)) < 0) {
+			git_mwindow_put_pack(entry.p);
+			goto done;
+		}
+
+		locations[count].p = entry.p;
+		locations[count].offset = entry.offset;
+		locations[count].po = po;
+		count++;
+	}
+
+	qsort(locations, count, sizeof(*locations), reuse_location_cmp);
+
+	/* a delta can be reused when its base is packed too, from the same place */
+	for (i = 0; i < count; i++) {
+		git_pobject *po = locations[i].po, *base;
+		git_object_t type;
+		size_t size;
+		off64_t data_offset, base_offset;
+
+		if (git_packfile__entry_header(&type, &size, &data_offset, &base_offset,
+				locations[i].p, locations[i].offset) < 0) {
+			/* not reusing a delta we cannot read is never wrong */
+			git_error_clear();
+			continue;
+		}
+
+		if (type != GIT_OBJECT_OFS_DELTA && type != GIT_OBJECT_REF_DELTA)
+			continue;
+
+		base = reused_base_at(locations, count, locations[i].p, base_offset);
+		if (!base || base == po || base->type != po->type)
+			continue;
+
+		po->delta = base;
+		po->delta_size = size;
+		po->reuse_pack = locations[i].p;
+		po->reuse_offset = data_offset;
+	}
+
+	if ((error = break_reused_chains(pb, GIT_PACK_DEPTH)) < 0)
+		goto done;
+
+	/*
+	 * Link reused deltas to their bases, so the search takes the depth of
+	 * reused deltas below an object into account when giving it a delta.
+	 */
+	for (i = 0; i < pb->nr_objects; i++) {
+		git_pobject *po = pb->object_list + i;
+
+		po->delta_child = NULL;
+		po->delta_sibling = NULL;
+	}
+	pb->nr_reused = 0;
+	for (i = 0; i < pb->nr_objects; i++) {
+		git_pobject *po = pb->object_list + i;
+
+		if (!po->reuse_pack)
+			continue;
+
+		po->delta_sibling = po->delta->delta_child;
+		po->delta->delta_child = po;
+		pb->nr_reused++;
+	}
+
+done:
+	git__free(locations);
+	return error;
+}
+
+void git_packbuilder_set_reuse_delta(git_packbuilder *pb, int enabled)
+{
+	pb->no_reuse_delta = !enabled;
+}
+
+uint32_t git_packbuilder__reused_count(git_packbuilder *pb)
+{
+	return pb->nr_reused;
+}
+
 int git_packbuilder__prepare(git_packbuilder *pb)
 {
 	git_pobject **delta_list;
@@ -1341,6 +1636,9 @@ int git_packbuilder__prepare(git_packbuilder *pb)
 
 	if (pb->nr_objects == 0 || pb->done)
 		return 0; /* nothing to do */
+
+	if (!pb->no_reuse_delta && (error = reuse_deltas(pb)) < 0)
+		return error;
 
 	/*
 	 * Although we do not report progress during deltafication, we
@@ -1359,6 +1657,10 @@ int git_packbuilder__prepare(git_packbuilder *pb)
 
 		/* Make sure the item is within our size limits */
 		if (po->size < 50 || po->size > pb->big_file_threshold)
+			continue;
+
+		/* a reused delta is kept, and not used as a base either, as git does */
+		if (po->reuse_pack)
 			continue;
 
 		delta_list[n++] = po;
@@ -1833,8 +2135,15 @@ int git_packbuilder_set_callbacks(git_packbuilder *pb, git_packbuilder_progress 
 
 void git_packbuilder_free(git_packbuilder *pb)
 {
+	struct git_pack_file *p;
+	size_t i;
+
 	if (pb == NULL)
 		return;
+
+	git_vector_foreach(&pb->reuse_packs, i, p)
+		git_mwindow_put_pack(p);
+	git_vector_dispose(&pb->reuse_packs);
 
 #ifdef GIT_THREADS
 
