@@ -915,6 +915,195 @@ void git_packfile_stream_dispose(git_packfile_stream *obj)
 	git_zstream_free(&obj->zstream);
 }
 
+int git_packfile__index_crc32(uint32_t *out, struct git_pack_file *p, const git_oid *id)
+{
+	const uint32_t *fanout;
+	const unsigned char *ids;
+	unsigned lo, hi;
+	int pos, error;
+
+	if (git_mutex_lock(&p->lock) < 0)
+		return packfile_error("failed to get lock for an entry checksum");
+
+	if ((error = pack_index_open_locked(p)) < 0)
+		goto cleanup;
+
+	/* only a version 2 index has checksums */
+	if (p->index_version < 2 || !p->index_map.data) {
+		git_error_set(GIT_ERROR_ODB, "pack index has no entry checksums");
+		error = GIT_ENOTFOUND;
+		goto cleanup;
+	}
+
+	fanout = (const uint32_t *)p->index_map.data + 2;
+	ids = (const unsigned char *)p->index_map.data + 8 + 4 * 256;
+	hi = ntohl(fanout[id->id[0]]);
+	lo = id->id[0] == 0 ? 0 : ntohl(fanout[id->id[0] - 1]);
+
+	pos = git_pack__lookup_id(ids, p->oid_size, lo, hi, id->id, p->oid_type);
+	if (pos < 0) {
+		error = git_odb__error_notfound("failed to find an entry checksum", id, p->oid_hexsize);
+		goto cleanup;
+	}
+
+	/* the checksums follow the ids, in the same order */
+	*out = ntohl(*(const uint32_t *)(ids + (size_t)p->num_objects * p->oid_size + 4 * (size_t)pos));
+
+cleanup:
+	git_mutex_unlock(&p->lock);
+	return error;
+}
+
+int git_packfile__crc32_range(uint32_t *crc, struct git_pack_file *p, off64_t start, off64_t end)
+{
+	git_mwindow *w = NULL;
+	uLong value = *crc;
+	int error = 0;
+
+	while (start < end) {
+		unsigned char *in;
+		unsigned int left;
+		size_t n;
+
+		/* so an error below is the one opening the window failed with */
+		git_error_clear();
+
+		if ((in = pack_window_open(p, &w, start, &left)) == NULL) {
+			if (!git_error_last()->klass)
+				packfile_error("unable to read the header of an entry");
+			error = -1;
+			break;
+		}
+
+		n = (size_t)min((off64_t)left, end - start);
+		value = crc32(value, in, (uInt)n);
+		start += n;
+	}
+
+	git_mwindow_close(&w);
+	*crc = (uint32_t)value;
+	return error;
+}
+
+void git_packfile__drop_cache(struct git_pack_file *p)
+{
+	if (git_mutex_lock(&p->bases.lock) < 0)
+		return;
+
+	/* this evicts every entry that is not in use */
+	free_lowest_entry(&p->bases);
+	git_mutex_unlock(&p->bases.lock);
+}
+
+#define COPY_INFLATE_BUFLEN (64 * 1024)
+
+int git_packfile__copy_compressed(
+		struct git_pack_file *p,
+		off64_t data_offset,
+		size_t size,
+		unsigned char *head,
+		size_t head_len,
+		size_t *head_out,
+		git_hash_ctx *hash,
+		git_packfile_copy_cb cb,
+		void *payload)
+{
+	git_zstream zstream = GIT_ZSTREAM_INIT;
+	git_mwindow *w = NULL;
+	unsigned char *buf;
+	off64_t position = data_offset;
+	size_t total = 0, kept = 0;
+	int error;
+
+	buf = git__malloc(COPY_INFLATE_BUFLEN);
+	GIT_ERROR_CHECK_ALLOC(buf);
+
+	if ((error = git_zstream_init(&zstream, GIT_ZSTREAM_INFLATE)) < 0)
+		goto done;
+
+	do {
+		unsigned char *in;
+		unsigned int left;
+		size_t in_len, consumed;
+		off64_t data_end = p->mwf.size - p->oid_size;
+
+		/* a stream that has not ended by the checksum ending the pack never will */
+		if (position < 0 || position >= data_end) {
+			error = packfile_error("compressed data runs past the end of the pack");
+			goto done;
+		}
+
+		/* so an error below is the one opening the window failed with */
+		git_error_clear();
+
+		if ((in = pack_window_open(p, &w, position, &left)) == NULL) {
+			if (!git_error_last()->klass)
+				packfile_error("unable to read compressed data");
+			error = -1;
+			goto done;
+		}
+
+		/* never hand zlib the checksum ending the pack */
+		in_len = left;
+		if ((off64_t)in_len > data_end - position)
+			in_len = (size_t)(data_end - position);
+
+		if ((error = git_zstream_set_input(&zstream, in, in_len)) < 0)
+			goto done;
+
+		while (zstream.in_len > 0 && !git_zstream_eos(&zstream)) {
+			size_t out_len = COPY_INFLATE_BUFLEN, in_before = zstream.in_len;
+
+			/* corrupt data or a wrong checksum, with zlib's message */
+			if ((error = git_zstream_get_output_chunk(buf, &out_len, &zstream)) < 0)
+				goto done;
+
+			if (kept < head_len) {
+				size_t n = min(head_len - kept, out_len);
+				memcpy(head + kept, buf, n);
+				kept += n;
+			}
+
+			if (out_len > size - total) {
+				error = packfile_error("compressed data decompresses past its size");
+				goto done;
+			}
+			total += out_len;
+
+			if (hash && out_len && (error = git_hash_update(hash, buf, out_len)) < 0)
+				goto done;
+
+			if (!out_len && zstream.in_len == in_before) {
+				error = packfile_error("compressed data makes no progress");
+				goto done;
+			}
+		}
+
+		/* zlib stops where the stream ends, and what is left is the next entry */
+		consumed = in_len - zstream.in_len;
+
+		if (git_zstream_eos(&zstream) && total != size) {
+			error = packfile_error("compressed data decompresses short of its size");
+			goto done;
+		}
+
+		/* w holds the window, so in stays mapped while cb runs */
+		if (consumed && (error = cb(in, consumed, payload)) < 0)
+			goto done;
+
+		position += consumed;
+	} while (!git_zstream_eos(&zstream));
+
+	if (head_out)
+		*head_out = kept;
+
+done:
+	git_mwindow_close(&w);
+	git_zstream_free(&zstream);
+	git__free(buf);
+	return error;
+}
+
 static int packfile_unpack_compressed(
 	git_rawobj *obj,
 	struct git_pack_file *p,

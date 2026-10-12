@@ -8,6 +8,8 @@
 #include "pack-objects.h"
 
 #include "buf.h"
+#include "filebuf.h"
+#include "futils.h"
 #include "zstream.h"
 #include "delta.h"
 #include "iterator.h"
@@ -372,6 +374,184 @@ static int read_reused_delta(void **out, git_pobject *po)
 	return 0;
 }
 
+struct copy_payload {
+	git_packbuilder *pb;
+	int (*write_cb)(void *buf, size_t size, void *cb_data);
+	void *cb_data;
+	uLong crc; /* of the entry copied, from its header on, when checked */
+};
+
+static int copy_compressed_cb(const void *data, size_t len, void *payload)
+{
+	struct copy_payload *copy = payload;
+	int error;
+
+	/* a window of the pack at most, which fits */
+	copy->crc = crc32(copy->crc, data, (uInt)len);
+
+	/* write_cb only reads the buffer, which is the mapped pack */
+	if ((error = copy->write_cb((void *)data, len, copy->cb_data)) < 0)
+		return error;
+
+	return git_hash_update(&copy->pb->ctx, data, len);
+}
+
+static int crc_cb(const void *data, size_t len, void *payload)
+{
+	uLong *crc = payload;
+
+	*crc = crc32(*crc, data, (uInt)len);
+	return 0;
+}
+
+/*
+ * A reused delta must have the checksum its pack index has for it, as when
+ * git reuses an object, since its size checks only compare it with what the
+ * same index entry leads to. This catches an index pointing an id at the
+ * entry of another object, which an indexer would otherwise have caught.
+ */
+static int check_reused_delta_crc(git_pobject *po, uint32_t crc)
+{
+	uint32_t expected;
+	int error;
+
+	if ((error = git_packfile__index_crc32(&expected, po->reuse_pack, &po->id)) < 0)
+		return error;
+
+	if (crc != expected) {
+		git_error_set(GIT_ERROR_INVALID, "reused delta for %s does not match the checksum in its pack index",
+			git_oid_tostr_s(&po->id));
+		return -1;
+	}
+
+	return 0;
+}
+
+/* the same for a reused delta that was decompressed, in a pass of its own */
+static int verify_reused_delta_crc(git_pobject *po)
+{
+	uint32_t crc = (uint32_t)crc32(0L, Z_NULL, 0);
+	uLong value;
+	int error;
+
+	if ((error = git_packfile__crc32_range(&crc, po->reuse_pack, po->reuse_entry, po->reuse_offset)) < 0)
+		return error;
+
+	value = crc;
+	if ((error = git_packfile__copy_compressed(po->reuse_pack, po->reuse_offset, po->delta_size,
+			NULL, 0, NULL, NULL, crc_cb, &value)) < 0)
+		return error;
+
+	return check_reused_delta_crc(po, (uint32_t)value);
+}
+
+/*
+ * Write an object stored whole in an existing pack, or a reused delta, under
+ * a header of its own, followed by its compressed data as it is stored. It is
+ * decompressed on the way and must have the size stored, and a delta must turn
+ * an object the size of its base into one the size of the object, as for
+ * read_reused_delta, though this is only known once the delta is written.
+ * When no indexer computes the ids, an object copied whole must also hash to
+ * its id, and a delta must have the checksum its pack index has for it.
+ */
+static int copy_object(
+	git_packbuilder *pb,
+	git_pobject *po,
+	int (*write_cb)(void *buf, size_t size, void *cb_data),
+	void *cb_data)
+{
+	struct copy_payload copy = { pb, write_cb, cb_data };
+	unsigned char hdr[10], head[20], id[GIT_HASH_MAX_SIZE];
+	char object_hdr[64];
+	size_t hdr_len, size, head_len = 0, base_size, result_size, oid_size, object_hdr_len;
+	struct git_pack_file *p;
+	git_object_t type;
+	git_hash_ctx hash;
+	bool verify = pb->index && !po->delta, check_crc = pb->index && po->delta;
+	off64_t offset;
+	int error;
+
+	oid_size = git_oid_size(pb->oid_type);
+
+	if (po->delta) {
+		type = GIT_OBJECT_REF_DELTA;
+		size = po->delta_size;
+		p = po->reuse_pack;
+		offset = po->reuse_offset;
+	} else {
+		type = po->type;
+		size = po->size;
+		p = po->whole_pack;
+		offset = po->whole_offset;
+	}
+
+	if ((error = git_packfile__object_header(&hdr_len, hdr, size, type)) < 0 ||
+	    (error = write_cb(hdr, hdr_len, cb_data)) < 0 ||
+	    (error = git_hash_update(&pb->ctx, hdr, hdr_len)) < 0)
+		return error;
+
+	if (po->delta &&
+	    ((error = write_cb(po->delta->id.id, oid_size, cb_data)) < 0 ||
+	     (error = git_hash_update(&pb->ctx, po->delta->id.id, oid_size)) < 0))
+		return error;
+
+	if (verify) {
+		if ((error = git_hash_ctx_init(&hash, git_oid_algorithm(pb->oid_type))) < 0)
+			return error;
+
+		if ((error = git_odb__format_object_header(&object_hdr_len,
+				object_hdr, sizeof(object_hdr), size, type)) < 0 ||
+		    (error = git_hash_update(&hash, object_hdr, object_hdr_len)) < 0)
+			goto done;
+	}
+
+	/* the checksum covers the header of the entry as stored too */
+	if (check_crc) {
+		uint32_t crc = (uint32_t)crc32(0L, Z_NULL, 0);
+
+		if ((error = git_packfile__crc32_range(&crc, p, po->reuse_entry, offset)) < 0)
+			goto done;
+		copy.crc = crc;
+	}
+
+	if ((error = git_packfile__copy_compressed(p, offset, size,
+			head, po->delta ? sizeof(head) : 0, &head_len,
+			verify ? &hash : NULL, copy_compressed_cb, &copy)) < 0)
+		goto done;
+
+	if (po->delta &&
+	    (git_delta_read_header(&base_size, &result_size, head, head_len) < 0 ||
+	     base_size != po->delta->size || result_size != po->size)) {
+		git_error_set(GIT_ERROR_INVALID, "reused delta for %s does not match its object",
+			git_oid_tostr_s(&po->id));
+		error = -1;
+		goto done;
+	}
+
+	if (check_crc && (error = check_reused_delta_crc(po, (uint32_t)copy.crc)) < 0)
+		goto done;
+
+	if (verify) {
+		if ((error = git_hash_final(id, &hash)) < 0)
+			goto done;
+
+		if (memcmp(id, po->id.id, oid_size) != 0) {
+			git_error_set(GIT_ERROR_INVALID, "object %s copied from a pack does not hash to its id",
+				git_oid_tostr_s(&po->id));
+			error = -1;
+			goto done;
+		}
+	}
+
+	pb->nr_written++;
+	pb->nr_copied++;
+
+done:
+	if (verify)
+		git_hash_ctx_cleanup(&hash);
+	return error;
+}
+
 static int write_object(
 	git_packbuilder *pb,
 	git_pobject *po,
@@ -387,6 +567,12 @@ static int write_object(
 
 	oid_size = git_oid_size(pb->oid_type);
 
+	/* written as stored, when that is a reused delta or the whole object */
+	if (pb->copy_compressed &&
+	    ((po->delta && po->reuse_pack && !po->delta_data) ||
+	     (!po->delta && po->whole_pack)))
+		return copy_object(pb, po, write_cb, cb_data);
+
 	/*
 	 * If we have a delta base, let's use the delta to save space.
 	 * Otherwise load the whole object. 'data' ends up pointing to
@@ -398,6 +584,12 @@ static int write_object(
 		else if (po->reuse_pack) {
 			if ((error = read_reused_delta(&data, po)) < 0)
 				goto done;
+
+			/* data is only freed below once written, so here on an error */
+			if (pb->index && (error = verify_reused_delta_crc(po)) < 0) {
+				git__free(data);
+				goto done;
+			}
 		} else if ((error = get_delta(&data, pb->odb, po)) < 0)
 				goto done;
 
@@ -470,6 +662,91 @@ done:
 	return error;
 }
 
+#define INDEX_WRITE_BUFLEN (1024 * 1024)
+
+/*
+ * Writes a pack to a file of its own, noting where each object starts and
+ * the checksum of its entry, for an index written from the ids packed
+ */
+struct pack_index_writer {
+	git_file fd;
+	unsigned char *buf;
+	size_t buf_len;
+	off64_t offset; /* bytes of the pack written so far */
+	uLong crc; /* of the entry being written */
+	uint32_t objects; /* objects written so far */
+	uint32_t nr_objects;
+	size_t checksum_size;
+	unsigned char checksum[GIT_HASH_MAX_SIZE]; /* the trailer ending the pack */
+	git_indexer_progress stats;
+	git_indexer_progress_cb progress_cb;
+	void *progress_cb_payload;
+};
+
+static int index_writer_flush(struct pack_index_writer *w)
+{
+	if (w->buf_len && p_write(w->fd, w->buf, w->buf_len) < 0) {
+		git_error_set(GIT_ERROR_OS, "failed to write pack file");
+		return -1;
+	}
+
+	w->buf_len = 0;
+	return 0;
+}
+
+static int index_writer_cb(void *data, size_t len, void *payload)
+{
+	struct pack_index_writer *w = payload;
+	const unsigned char *bytes = data;
+	size_t done = 0;
+
+	/* the trailer is the one write after every object */
+	if (w->objects == w->nr_objects && len == w->checksum_size)
+		memcpy(w->checksum, data, len);
+
+	while (done < len) {
+		uInt n = (len - done) > UINT_MAX ? UINT_MAX : (uInt)(len - done);
+
+		w->crc = crc32(w->crc, bytes + done, n);
+		done += n;
+	}
+	w->offset += len;
+
+	if (w->buf_len + len > INDEX_WRITE_BUFLEN) {
+		if (index_writer_flush(w) < 0)
+			return -1;
+
+		if (len >= INDEX_WRITE_BUFLEN) {
+			if (p_write(w->fd, data, len) < 0) {
+				git_error_set(GIT_ERROR_OS, "failed to write pack file");
+				return -1;
+			}
+			return 0;
+		}
+	}
+
+	memcpy(w->buf + w->buf_len, data, len);
+	w->buf_len += len;
+	return 0;
+}
+
+static int index_writer_object_written(struct pack_index_writer *w)
+{
+	int error;
+
+	w->objects++;
+
+	if (!w->progress_cb)
+		return 0;
+
+	w->stats.received_objects = w->stats.indexed_objects = w->objects;
+	w->stats.received_bytes = (size_t)w->offset;
+	if ((error = w->progress_cb(&w->stats, w->progress_cb_payload)) != 0)
+		return git_error_set_after_callback_function(error, "git_packbuilder_write");
+
+	return 0;
+}
+
 enum write_one_status {
 	WRITE_ONE_SKIP = -1, /* already written */
 	WRITE_ONE_BREAK = 0, /* writing this will bust the limit; not written */
@@ -509,7 +786,18 @@ static int write_one(
 	po->written = 1;
 	po->recursing = 0;
 
-	return write_object(pb, po, write_cb, cb_data);
+	if (!pb->index)
+		return write_object(pb, po, write_cb, cb_data);
+
+	/* where the entry starts in the pack, and its checksum once written */
+	po->offset = pb->index->offset;
+	pb->index->crc = crc32(0L, Z_NULL, 0);
+
+	if ((error = write_object(pb, po, write_cb, cb_data)) < 0)
+		return error;
+
+	po->crc32 = (uint32_t)pb->index->crc;
+	return index_writer_object_written(pb->index);
 }
 
 GIT_INLINE(void) add_to_write_order(git_pobject **wo, size_t *endp,
@@ -1453,6 +1741,7 @@ static void drop_reused_delta(git_pobject *po)
 	po->delta_size = 0;
 	po->reuse_pack = NULL;
 	po->reuse_offset = 0;
+	po->reuse_entry = 0;
 }
 
 /*
@@ -1524,9 +1813,125 @@ done:
 	return error;
 }
 
+/* a stored delta whose base was located in another pack than the delta */
+struct base_elsewhere {
+	git_pobject *po;
+	struct git_pack_file *p;
+	off64_t entry_offset;
+	off64_t base_offset;
+	off64_t data_offset;
+	size_t size;
+};
+
+typedef git_array_t(struct base_elsewhere) base_elsewhere_array;
+
+struct entry_offset {
+	off64_t offset;
+	git_oid id;
+};
+
+typedef git_array_t(struct entry_offset) entry_offset_array;
+
+static int base_elsewhere_cmp(const void *a, const void *b)
+{
+	const struct base_elsewhere *x = a, *y = b;
+
+	if (x->p != y->p)
+		return (uintptr_t)x->p < (uintptr_t)y->p ? -1 : 1;
+	return 0;
+}
+
+static int entry_offset_cmp(const void *a, const void *b)
+{
+	const struct entry_offset *x = a, *y = b;
+
+	if (x->offset != y->offset)
+		return x->offset < y->offset ? -1 : 1;
+	return 0;
+}
+
+/* runs with the pack locked, so it must not read the pack */
+static int collect_entry_offset(const git_oid *id, off64_t offset, void *payload)
+{
+	entry_offset_array *entries = payload;
+	struct entry_offset *entry = git_array_alloc(*entries);
+
+	GIT_ERROR_CHECK_ALLOC(entry);
+	entry->offset = offset;
+	git_oid_cpy(&entry->id, id);
+	return 0;
+}
+
+/*
+ * An object stored in several packs is located in one of them, so a delta
+ * can find its base located in another pack. As a delta is written against
+ * the id of its base, it is reused all the same when the object at its base
+ * offset is packed too, which takes the ids at each offset of its pack. Only
+ * packs no larger than what is packed are read, up to a few times the objects
+ * packed in all, as a large pack is mostly objects that are not packed.
+ */
+static int reuse_deltas_with_bases_elsewhere(
+	git_packbuilder *pb,
+	struct base_elsewhere *items,
+	size_t count)
+{
+	entry_offset_array entries = GIT_ARRAY_INIT;
+	size_t i, j, start, listed = 0, budget = 4 * (size_t)pb->nr_objects;
+	int error = 0;
+
+	qsort(items, count, sizeof(*items), base_elsewhere_cmp);
+
+	for (start = 0; start < count; start = i) {
+		struct git_pack_file *p = items[start].p;
+
+		for (i = start; i < count && items[i].p == p; i++)
+			;
+
+		if (p->num_objects > pb->nr_objects || listed + p->num_objects > budget)
+			continue;
+		listed += p->num_objects;
+
+		git_array_clear(entries);
+		if ((error = git_pack_foreach_entry_offset(p, collect_entry_offset, &entries)) < 0) {
+			/* this only saves rebuilding deltas, so a pack it cannot list is left as it is */
+			if (git_error_last()->klass == GIT_ERROR_NOMEMORY)
+				goto done;
+
+			git_error_clear();
+			error = 0;
+			continue;
+		}
+		qsort(entries.ptr, entries.size, sizeof(struct entry_offset), entry_offset_cmp);
+
+		for (j = start; j < i; j++) {
+			struct base_elsewhere *item = items + j;
+			struct entry_offset key, *found;
+			git_pobject *base;
+
+			key.offset = item->base_offset;
+			found = bsearch(&key, entries.ptr, entries.size, sizeof(key), entry_offset_cmp);
+			if (!found ||
+			    git_packbuilder_pobjectmap_get(&base, &pb->object_ix, &found->id) != 0 ||
+			    base == item->po || base->type != item->po->type)
+				continue;
+
+			item->po->delta = base;
+			item->po->delta_size = item->size;
+			item->po->reuse_pack = p;
+			item->po->reuse_offset = item->data_offset;
+			item->po->reuse_entry = item->entry_offset;
+		}
+	}
+
+done:
+	git_array_clear(entries);
+	return error;
+}
+
 static int reuse_deltas(git_packbuilder *pb)
 {
 	struct reuse_location *locations;
+	base_elsewhere_array elsewhere = GIT_ARRAY_INIT;
 	size_t i, count = 0;
 	int error = 0;
 
@@ -1561,7 +1966,10 @@ static int reuse_deltas(git_packbuilder *pb)
 
 	qsort(locations, count, sizeof(*locations), reuse_location_cmp);
 
-	/* a delta can be reused when its base is packed too, from the same place */
+	/*
+	 * A delta can be reused when its base is packed too, from the same place,
+	 * and an object stored whole can be copied as it is
+	 */
 	for (i = 0; i < count; i++) {
 		git_pobject *po = locations[i].po, *base;
 		git_object_t type;
@@ -1575,18 +1983,53 @@ static int reuse_deltas(git_packbuilder *pb)
 			continue;
 		}
 
-		if (type != GIT_OBJECT_OFS_DELTA && type != GIT_OBJECT_REF_DELTA)
+		if (type != GIT_OBJECT_OFS_DELTA && type != GIT_OBJECT_REF_DELTA) {
+			if (pb->copy_compressed && type == po->type && size == po->size) {
+				po->whole_pack = locations[i].p;
+				po->whole_offset = data_offset;
+			}
+			continue;
+		}
+
+		if (pb->no_reuse_delta)
+			continue;
+
+		/*
+		 * Without an indexer a reused delta is checked against the checksum
+		 * its pack index has for it, which an index older than version 2 lacks
+		 */
+		if (pb->index_from_ids && locations[i].p->index_version < 2)
 			continue;
 
 		base = reused_base_at(locations, count, locations[i].p, base_offset);
-		if (!base || base == po || base->type != po->type)
+		if (!base) {
+			struct base_elsewhere *item = git_array_alloc(elsewhere);
+
+			if (!item) {
+				error = -1;
+				goto done;
+			}
+			item->po = po;
+			item->p = locations[i].p;
+			item->entry_offset = locations[i].offset;
+			item->base_offset = base_offset;
+			item->data_offset = data_offset;
+			item->size = size;
+			continue;
+		}
+		if (base == po || base->type != po->type)
 			continue;
 
 		po->delta = base;
 		po->delta_size = size;
 		po->reuse_pack = locations[i].p;
 		po->reuse_offset = data_offset;
+		po->reuse_entry = locations[i].offset;
 	}
+
+	if (elsewhere.size &&
+	    (error = reuse_deltas_with_bases_elsewhere(pb, elsewhere.ptr, elsewhere.size)) < 0)
+		goto done;
 
 	if ((error = break_reused_chains(pb, GIT_PACK_DEPTH)) < 0)
 		goto done;
@@ -1614,6 +2057,7 @@ static int reuse_deltas(git_packbuilder *pb)
 	}
 
 done:
+	git_array_clear(elsewhere);
 	git__free(locations);
 	return error;
 }
@@ -1628,6 +2072,26 @@ uint32_t git_packbuilder__reused_count(git_packbuilder *pb)
 	return pb->nr_reused;
 }
 
+void git_packbuilder_set_delta_search(git_packbuilder *pb, int enabled)
+{
+	pb->no_delta_search = !enabled;
+}
+
+void git_packbuilder_set_copy_compressed(git_packbuilder *pb, int enabled)
+{
+	pb->copy_compressed = !!enabled;
+}
+
+void git_packbuilder_set_index_from_ids(git_packbuilder *pb, int enabled)
+{
+	pb->index_from_ids = !!enabled;
+}
+
+uint32_t git_packbuilder__copied_count(git_packbuilder *pb)
+{
+	return pb->nr_copied;
+}
+
 int git_packbuilder__prepare(git_packbuilder *pb)
 {
 	git_pobject **delta_list;
@@ -1637,7 +2101,9 @@ int git_packbuilder__prepare(git_packbuilder *pb)
 	if (pb->nr_objects == 0 || pb->done)
 		return 0; /* nothing to do */
 
-	if (!pb->no_reuse_delta && (error = reuse_deltas(pb)) < 0)
+	/* this also finds where objects are stored whole, for copying them */
+	if ((!pb->no_reuse_delta || pb->copy_compressed) &&
+	    (error = reuse_deltas(pb)) < 0)
 		return error;
 
 	/*
@@ -1647,6 +2113,13 @@ int git_packbuilder__prepare(git_packbuilder *pb)
 	if (pb->progress_cb) {
 		if ((error = pb->progress_cb(GIT_PACKBUILDER_DELTAFICATION, 0, pb->nr_objects, pb->progress_cb_payload)) < 0)
 			return git_error_set_after_callback(error);
+	}
+
+	/* objects without a delta to reuse are written whole */
+	if (pb->no_delta_search) {
+		error = report_delta_progress(pb, pb->nr_objects, true);
+		pb->done = true;
+		return error;
 	}
 
 	delta_list = git__mallocarray(pb->nr_objects, sizeof(*delta_list));
@@ -1711,6 +2184,203 @@ static int write_cb(void *buf, size_t len, void *payload)
 	return git_indexer_append(ctx->indexer, buf, len, ctx->stats);
 }
 
+static int pobject_id_cmp(const void *a, const void *b)
+{
+	const git_pobject *x = a, *y = b;
+
+	return git_oid_cmp(&x->id, &y->id);
+}
+
+/*
+ * Write the pack to a file of its own and its index from the ids packed and
+ * where each went, instead of reading every object back with an indexer. The
+ * files are committed in the order the indexer uses, the index and then the pack.
+ */
+static int write_pack_and_index(
+	git_packbuilder *pb,
+	const char *path,
+	unsigned int mode,
+	git_indexer_progress_cb progress_cb,
+	void *progress_cb_payload)
+{
+	struct pack_index_writer w;
+	git_str tmp_base = GIT_STR_INIT, tmp_path = GIT_STR_INIT, tmp_index = GIT_STR_INIT;
+	git_str final_path = GIT_STR_INIT;
+	git_filebuf index_file = GIT_FILEBUF_INIT;
+	git_hash_algorithm_t algorithm = git_oid_algorithm(pb->oid_type);
+	struct git_pack_idx_header hdr;
+	git_pobject **sorted = NULL;
+	char name[(GIT_HASH_MAX_SIZE * 2) + 1];
+	unsigned char checksum[GIT_HASH_MAX_SIZE];
+	uint32_t fanout[256] = { 0 }, n, long_offsets = 0;
+	size_t i, oid_size = git_oid_size(pb->oid_type);
+	int do_fsync = git_repository__fsync_gitdir, t, error = -1;
+
+	memset(&w, 0, sizeof(w));
+	w.fd = -1;
+	w.nr_objects = pb->nr_objects;
+	w.checksum_size = git_hash_size(algorithm);
+	w.stats.total_objects = pb->nr_objects;
+	w.progress_cb = progress_cb;
+	w.progress_cb_payload = progress_cb_payload;
+
+	if (!mode)
+		mode = GIT_PACK_FILE_MODE;
+
+	if (!git_repository__configmap_lookup(&t, pb->repo, GIT_CONFIGMAP_FSYNCOBJECTFILES) && t)
+		do_fsync = 1;
+
+	if ((w.buf = git__malloc(INDEX_WRITE_BUFLEN)) == NULL ||
+	    git_str_joinpath(&tmp_base, path, "pack") < 0 ||
+	    (w.fd = git_futils_mktmp(&tmp_path, tmp_base.ptr, mode)) < 0)
+		goto done;
+
+	pb->index = &w;
+	error = git_packbuilder_foreach(pb, index_writer_cb, &w);
+	pb->index = NULL;
+
+	if (error < 0 || (error = index_writer_flush(&w)) < 0)
+		goto done;
+
+	if (w.objects != pb->nr_objects) {
+		git_error_set(GIT_ERROR_INVALID, "not every object was written to the pack");
+		error = -1;
+		goto done;
+	}
+
+	/* the index lists the objects by id, counting them by first byte */
+	if (pb->nr_objects &&
+	    (sorted = git__mallocarray(pb->nr_objects, sizeof(*sorted))) == NULL) {
+		error = -1;
+		goto done;
+	}
+	for (i = 0; i < pb->nr_objects; i++) {
+		sorted[i] = pb->object_list + i;
+		fanout[sorted[i]->id.id[0]]++;
+	}
+	git__tsort((void **)sorted, pb->nr_objects, pobject_id_cmp);
+	for (i = 1; i < 256; i++)
+		fanout[i] += fanout[i - 1];
+
+	/* named by its trailer, so different contents get different names */
+	if ((error = git_hash_fmt(name, w.checksum, w.checksum_size)) < 0 ||
+	    (error = git_str_joinpath(&final_path, path, "pack-")) < 0 ||
+	    (error = git_str_puts(&final_path, name)) < 0 ||
+	    (error = git_str_puts(&final_path, ".idx")) < 0)
+		goto done;
+
+	/*
+	 * Locked under the name of the temporary pack and renamed when committed,
+	 * as a lock left by a process killed while writing would otherwise stop
+	 * every later write of the same pack
+	 */
+	if ((error = git_str_printf(&tmp_index, "%s.idx", tmp_path.ptr)) < 0 ||
+	    (error = git_filebuf_open(&index_file, tmp_index.ptr,
+			git_filebuf_hash_flags(algorithm) | (do_fsync ? GIT_FILEBUF_FSYNC : 0),
+			mode)) < 0)
+		goto done;
+
+	hdr.idx_signature = htonl(PACK_IDX_SIGNATURE);
+	hdr.idx_version = htonl(2);
+	if ((error = git_filebuf_write(&index_file, &hdr, sizeof(hdr))) < 0)
+		goto done;
+
+	for (i = 0; i < 256; i++) {
+		n = htonl(fanout[i]);
+		if ((error = git_filebuf_write(&index_file, &n, sizeof(n))) < 0)
+			goto done;
+	}
+
+	for (i = 0; i < pb->nr_objects; i++) {
+		if ((error = git_filebuf_write(&index_file, sorted[i]->id.id, oid_size)) < 0)
+			goto done;
+	}
+
+	for (i = 0; i < pb->nr_objects; i++) {
+		n = htonl(sorted[i]->crc32);
+		if ((error = git_filebuf_write(&index_file, &n, sizeof(n))) < 0)
+			goto done;
+	}
+
+	/* offsets past 31 bits are listed after the others, by 64 bits */
+	for (i = 0; i < pb->nr_objects; i++) {
+		if (sorted[i]->offset > 0x7fffffff)
+			n = htonl(0x80000000 | long_offsets++);
+		else
+			n = htonl((uint32_t)sorted[i]->offset);
+
+		if ((error = git_filebuf_write(&index_file, &n, sizeof(n))) < 0)
+			goto done;
+	}
+
+	for (i = 0; i < pb->nr_objects; i++) {
+		uint32_t split[2];
+
+		if (sorted[i]->offset <= 0x7fffffff)
+			continue;
+
+		split[0] = htonl((uint32_t)(sorted[i]->offset >> 32));
+		split[1] = htonl((uint32_t)(sorted[i]->offset & 0xffffffff));
+		if ((error = git_filebuf_write(&index_file, split, sizeof(split))) < 0)
+			goto done;
+	}
+
+	if ((error = git_filebuf_write(&index_file, w.checksum, w.checksum_size)) < 0 ||
+	    (error = git_filebuf_hash(checksum, &index_file)) < 0 ||
+	    (error = git_filebuf_write(&index_file, checksum, w.checksum_size)) < 0 ||
+	    (error = git_filebuf_commit_at(&index_file, final_path.ptr)) < 0)
+		goto done;
+
+	if (do_fsync && p_fsync(w.fd) < 0) {
+		git_error_set(GIT_ERROR_OS, "failed to fsync packfile");
+		error = -1;
+		goto done;
+	}
+
+	error = p_close(w.fd);
+	w.fd = -1;
+	if (error < 0) {
+		git_error_set(GIT_ERROR_OS, "failed to close packfile");
+		goto done;
+	}
+
+	git_str_truncate(&final_path, final_path.size - strlen(".idx"));
+	if ((error = git_str_puts(&final_path, ".pack")) < 0)
+		goto done;
+
+	if ((error = p_rename(tmp_path.ptr, final_path.ptr)) < 0) {
+		git_error_set(GIT_ERROR_OS, "failed to rename packfile to '%s'", final_path.ptr);
+		goto done;
+	}
+	git_str_clear(&tmp_path);
+
+	if (do_fsync && (error = git_futils_fsync_parent(final_path.ptr)) < 0)
+		goto done;
+
+#ifndef GIT_DEPRECATE_HARD
+	if ((error = git_oid__fromraw(&pb->pack_oid, w.checksum, pb->oid_type)) < 0)
+		goto done;
+#endif
+
+	if ((pb->pack_name = git__strdup(name)) == NULL)
+		error = -1;
+
+done:
+	pb->index = NULL;
+	if (w.fd >= 0)
+		p_close(w.fd);
+	if (git_str_len(&tmp_path) > 0)
+		p_unlink(tmp_path.ptr);
+	git_filebuf_cleanup(&index_file);
+	git__free(sorted);
+	git__free(w.buf);
+	git_str_dispose(&tmp_base);
+	git_str_dispose(&tmp_path);
+	git_str_dispose(&tmp_index);
+	git_str_dispose(&final_path);
+	return error;
+}
+
 int git_packbuilder_write(
 	git_packbuilder *pb,
 	const char *path,
@@ -1734,6 +2404,11 @@ int git_packbuilder_write(
 		if ((error = git_str_joinpath(&object_path, git_str_cstr(&object_path), "pack")) < 0)
 			goto cleanup;
 		path = git_str_cstr(&object_path);
+	}
+
+	if (pb->index_from_ids) {
+		error = write_pack_and_index(pb, path, mode, progress_cb, progress_cb_payload);
+		goto cleanup;
 	}
 
 	opts.progress_cb = progress_cb;
@@ -2141,8 +2816,14 @@ void git_packbuilder_free(git_packbuilder *pb)
 	if (pb == NULL)
 		return;
 
-	git_vector_foreach(&pb->reuse_packs, i, p)
+	/*
+	 * Objects read whole from these packs fill their delta base caches,
+	 * which would outlive the packbuilder as long as the repository is open
+	 */
+	git_vector_foreach(&pb->reuse_packs, i, p) {
+		git_packfile__drop_cache(p);
 		git_mwindow_put_pack(p);
+	}
 	git_vector_dispose(&pb->reuse_packs);
 
 #ifdef GIT_THREADS

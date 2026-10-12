@@ -13,6 +13,7 @@
 #include "git2/oid.h"
 
 #include "array.h"
+#include "hash.h"
 #include "map.h"
 #include "mwindow.h"
 #include "odb.h"
@@ -189,6 +190,42 @@ int git_packfile__entry_header(
 		off64_t *base_offset_out,
 		struct git_pack_file *p,
 		off64_t offset);
+
+/*
+ * The checksum a version 2 pack index has for the entry of id, which covers
+ * the entry as stored, header included. GIT_ENOTFOUND for an older index.
+ */
+int git_packfile__index_crc32(uint32_t *out, struct git_pack_file *p, const git_oid *id);
+
+/* Continue crc with the bytes of the pack from start up to end */
+int git_packfile__crc32_range(uint32_t *crc, struct git_pack_file *p, off64_t start, off64_t end);
+
+/*
+ * Empty the delta base cache of a pack, keeping only entries in use, as a pack
+ * read through once can be left holding up to GIT_PACK_CACHE_MEMORY_LIMIT
+ */
+void git_packfile__drop_cache(struct git_pack_file *p);
+
+typedef int (*git_packfile_copy_cb)(const void *data, size_t len, void *payload);
+
+/*
+ * Hand the compressed data starting at data_offset to cb exactly as it is
+ * stored, a window at a time, decompressing it on the way with a small
+ * buffer, so zlib checks it and finds where it ends, and it must decompress
+ * to size bytes. The first head_len decompressed bytes are kept in head, for
+ * the header of a delta, and head_out is how many there were. What it
+ * decompresses to is also added to hash, unless that is NULL.
+ */
+int git_packfile__copy_compressed(
+		struct git_pack_file *p,
+		off64_t data_offset,
+		size_t size,
+		unsigned char *head,
+		size_t head_len,
+		size_t *head_out,
+		git_hash_ctx *hash,
+		git_packfile_copy_cb cb,
+		void *payload);
 
 int git_packfile_unpack(git_rawobj *obj, struct git_pack_file *p, off64_t *obj_offset);
 

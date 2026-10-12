@@ -49,6 +49,14 @@ typedef struct git_pobject {
 	/* where the delta reused from an existing pack is stored, or NULL */
 	struct git_pack_file *reuse_pack;
 	off64_t reuse_offset;
+	off64_t reuse_entry; /* where its entry starts, header included */
+
+	/* where the object is stored whole in an existing pack, for copying, or NULL */
+	struct git_pack_file *whole_pack;
+	off64_t whole_offset;
+
+	/* checksum of the entry written, for an index the packbuilder writes itself */
+	uint32_t crc32;
 
 	unsigned int written:1,
 	             recursing:1,
@@ -105,6 +113,11 @@ struct git_packbuilder {
 	bool no_reuse_delta; /* compute every delta instead of reusing them */
 	git_vector reuse_packs; /* packs deltas are reused from, referenced */
 	uint32_t nr_reused; /* objects whose delta is reused */
+	bool no_delta_search; /* write objects whole instead of searching for deltas */
+	bool copy_compressed; /* copy compressed data of stored objects as it is */
+	uint32_t nr_copied; /* objects copied as compressed in their pack */
+	bool index_from_ids; /* write the index from the ids packed, without an indexer */
+	struct pack_index_writer *index; /* while writing a pack and its index */
 
 	git_packbuilder_progress progress_cb;
 	void *progress_cb_payload;
@@ -123,6 +136,9 @@ int git_packbuilder__write_buf(git_str *buf, git_packbuilder *pb);
 
 /* the number of objects whose delta was reused from an existing pack */
 uint32_t git_packbuilder__reused_count(git_packbuilder *pb);
+
+/* the number of objects copied as they are compressed in an existing pack */
+uint32_t git_packbuilder__copied_count(git_packbuilder *pb);
 int git_packbuilder__prepare(git_packbuilder *pb);
 
 

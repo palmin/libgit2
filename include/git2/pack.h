@@ -91,6 +91,50 @@ GIT_EXTERN(unsigned int) git_packbuilder_set_threads(git_packbuilder *pb, unsign
 GIT_EXTERN(void) git_packbuilder_set_reuse_delta(git_packbuilder *pb, int enabled);
 
 /**
+ * Set whether to search for new deltas
+ *
+ * By default objects without a delta to reuse are compared with similar
+ * objects to find one, which takes time and memory for large objects.
+ * Turning this off writes them whole, while deltas stored in existing
+ * packs are still reused unless that is turned off too.
+ *
+ * @param pb The packbuilder
+ * @param enabled Whether to search for deltas
+ */
+GIT_EXTERN(void) git_packbuilder_set_delta_search(git_packbuilder *pb, int enabled);
+
+/**
+ * Set whether objects are copied as they are compressed in existing packs
+ *
+ * By default every object written is compressed again. Turning this on
+ * copies the compressed data of an object stored whole in a pack, and of a
+ * reused delta, as it is, decompressing it on the way so it is checked,
+ * like `git pack-objects` reusing objects. Objects given a new delta are
+ * still compressed.
+ *
+ * @param pb The packbuilder
+ * @param enabled Whether to copy compressed data
+ */
+GIT_EXTERN(void) git_packbuilder_set_copy_compressed(git_packbuilder *pb, int enabled);
+
+/**
+ * Set whether `git_packbuilder_write` writes the index from the ids packed
+ *
+ * By default the pack is written through an indexer, which reads every
+ * object back to compute its id, rebuilding each delta from its base and
+ * holding both in memory. Turning this on writes the index from the ids
+ * of the objects packed, like `git pack-objects`. An object copied whole
+ * is hashed as it is copied and one read from the object database is
+ * checked as it is read, while a reused delta must have the checksum its
+ * pack index has for it, as git checks objects it reuses, so deltas are
+ * only reused from version 2 indexes.
+ *
+ * @param pb The packbuilder
+ * @param enabled Whether to write the index from the ids packed
+ */
+GIT_EXTERN(void) git_packbuilder_set_index_from_ids(git_packbuilder *pb, int enabled);
+
+/**
  * Insert a single object
  *
  * For an optimal pack it's mandatory to insert objects in recency order,
