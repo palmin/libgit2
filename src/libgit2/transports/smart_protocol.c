@@ -420,6 +420,7 @@ int git_smart__negotiate_fetch(
 	git_pkt_type pkt_type;
 	unsigned int i;
 	git_oid oid;
+	bool acked = false;
 
 	if ((error = setup_caps(&t->caps, wants)) < 0 ||
 	    (error = setup_shallow_roots(&t->shallow_roots, wants)) < 0)
@@ -513,6 +514,7 @@ int git_smart__negotiate_fetch(
 					goto on_error;
 
 				if (pkt_type == GIT_PKT_ACK) {
+					acked = true;
 					break;
 				} else if (pkt_type == GIT_PKT_NAK) {
 					continue;
@@ -580,8 +582,16 @@ int git_smart__negotiate_fetch(
 	git_str_dispose(&data);
 	git_revwalk_free(walk);
 
-	/* Now let's eat up whatever the server gives us */
-	if (!t->caps.multi_ack && !t->caps.multi_ack_detailed) {
+	/*
+	 * Now let's eat up whatever the server gives us. Without multi_ack
+	 * the server acknowledges only the first common commit, and once it
+	 * has, it sends nothing after "done" and goes straight on to the
+	 * pack (see gitprotocol-pack(5) and git's fetch-pack.c). Otherwise
+	 * it answers "done" with an ACK or a NAK.
+	 */
+	if (t->caps.multi_ack || t->caps.multi_ack_detailed) {
+		error = wait_while_ack(t);
+	} else if (!acked) {
 		if ((error = recv_pkt(NULL, &pkt_type, t)) < 0)
 			return error;
 
@@ -589,8 +599,6 @@ int git_smart__negotiate_fetch(
 			git_error_set(GIT_ERROR_NET, "unexpected pkt type");
 			return -1;
 		}
-	} else {
-		error = wait_while_ack(t);
 	}
 
 	return error;
