@@ -217,6 +217,25 @@ static void seed_every_object(void)
 	git_odb_free(odb);
 }
 
+void test_pack_packbuilder__counts_objects_by_type(void)
+{
+	uint32_t commits, trees, blobs, tags;
+
+	seed_packbuilder();
+
+	commits = git_packbuilder__type_count(_packbuilder, GIT_OBJECT_COMMIT);
+	trees = git_packbuilder__type_count(_packbuilder, GIT_OBJECT_TREE);
+	blobs = git_packbuilder__type_count(_packbuilder, GIT_OBJECT_BLOB);
+	tags = git_packbuilder__type_count(_packbuilder, GIT_OBJECT_TAG);
+
+	cl_assert_equal_i(_commits.length, commits);
+	cl_assert(trees > 0);
+	cl_assert(blobs > 0);
+	cl_assert_equal_i(0, tags);
+	cl_assert_equal_i(git_packbuilder_object_count(_packbuilder),
+		commits + trees + blobs + tags);
+}
+
 void test_pack_packbuilder__reuses_deltas(void)
 {
 	seed_every_object();

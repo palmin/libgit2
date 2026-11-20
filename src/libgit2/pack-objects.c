@@ -2092,6 +2092,18 @@ uint32_t git_packbuilder__copied_count(git_packbuilder *pb)
 	return pb->nr_copied;
 }
 
+uint32_t git_packbuilder__type_count(git_packbuilder *pb, git_object_t type)
+{
+	uint32_t i, count = 0;
+
+	for (i = 0; i < pb->nr_objects; i++) {
+		if (pb->object_list[i].type == type)
+			count++;
+	}
+
+	return count;
+}
+
 int git_packbuilder__prepare(git_packbuilder *pb)
 {
 	git_pobject **delta_list;

@@ -139,6 +139,9 @@ uint32_t git_packbuilder__reused_count(git_packbuilder *pb);
 
 /* the number of objects copied as they are compressed in an existing pack */
 uint32_t git_packbuilder__copied_count(git_packbuilder *pb);
+
+/* the number of objects of the given type inserted so far */
+uint32_t git_packbuilder__type_count(git_packbuilder *pb, git_object_t type);
 int git_packbuilder__prepare(git_packbuilder *pb);
 
 
